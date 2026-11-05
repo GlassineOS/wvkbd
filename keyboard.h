@@ -56,6 +56,7 @@ struct clr_scheme {
 	Color text;
 	Color text_press;
 	Color text_swipe;
+	Color stroke;       /* glassine: key outline (--stroke), alpha 0 = none */
 	char *font;
 	int rounding;
 	PangoFontDescription *font_description;
@@ -150,6 +151,7 @@ void kbd_print_key_stdout(struct kbd *kb, struct key *k);
 void kbd_print_first_utf8_char_stdout(const char *str);
 void kbd_clear_last_popup(struct kbd *kb);
 void kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type);
+extern int kbd_stroke_width;            /* glassine: --stroke-width (px) */
 void kbd_draw_layout(struct kbd *kb);
 void kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount);
 uint8_t kbd_get_rows(struct layout *l);

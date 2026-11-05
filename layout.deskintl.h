@@ -6,7 +6,8 @@
 #define KBD_PIXEL_LANDSCAPE_HEIGHT 400
 
 /* spacing around each key */
-#define KBD_KEY_BORDER 2
+extern int kbd_key_border;             /* glassine: --gap */
+#define KBD_KEY_BORDER kbd_key_border
 
 /* layout declarations */
 enum layout_id {

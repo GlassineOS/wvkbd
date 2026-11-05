@@ -700,6 +700,9 @@ usage(char *argv0)
     fprintf(stderr, "  --text [rrggbb|aa]     - Set color of text on keys\n");
     fprintf(stderr,
             "  --text-sp [rrggbb|aa]  - Set color of text on special keys\n");
+    fprintf(stderr, "  --stroke, --stroke-sp [rrggbb|aa] - glassine: key outline colors\n");
+    fprintf(stderr, "  --stroke-width [int]   - glassine: key outline width in pixels\n");
+    fprintf(stderr, "  --gap [int]            - glassine: space around each key in pixels (2)\n");
     fprintf(stderr,
             "  --text-press [rrggbb|aa]    - Set color of text on pressed keys\n");
     fprintf(stderr,
@@ -1070,6 +1073,21 @@ main(int argc, char **argv)
                 exit(1);
             }
             height = landscape_height = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--stroke") || !strcmp(argv[i], "--stroke-sp")) {
+            if (i >= argc - 1) {
+                usage(argv[0]);
+                exit(1);
+            }
+            uint8_t *c = keyboard.schemes[!strcmp(argv[i], "--stroke-sp")].stroke.bgra;
+            c[3] = 255;                 /* rrggbb: opaque (starts at alpha 0 = off) */
+            set_kbd_colors(c, argv[++i]);
+        } else if (!strcmp(argv[i], "--stroke-width") || !strcmp(argv[i], "--gap")) {
+            if (i >= argc - 1) {
+                usage(argv[0]);
+                exit(1);
+            }
+            int *v = !strcmp(argv[i], "--gap") ? &kbd_key_border : &kbd_stroke_width;
+            *v = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "-R")) {
             if (i >= argc - 1) {
                 usage(argv[0]);
