@@ -27,6 +27,7 @@ enum layout_id {
 	Nav,
 	Landscape,
 	LandscapeSpecial,
+	German,         /* glassine: QWERTZ with umlauts */
 	ComposeA,
 	ComposeE,
 	ComposeY,
@@ -82,7 +83,7 @@ static struct key keys_full[], keys_full_wide[], keys_special[], keys_specialpad
   keys_compose_cyr_i[], keys_compose_cyr_j[], keys_compose_cyr_e[],
   keys_compose_cyr_u[], keys_compose_cyr_l[], keys_compose_cyr_n[],
   keys_compose_cyr_tse[], keys_compose_cyr_che[], keys_compose_cyr_g[],
-  keys_compose_cyr_k[], keys_dialer[], keys_index[];
+  keys_compose_cyr_k[], keys_dialer[], keys_index[], keys_german[];
 
 static struct layout layouts[NumLayouts] = {
   [Full] = {keys_full, "latin", "full", true}, // second parameter is the keymap name
@@ -103,6 +104,7 @@ static struct layout layouts[NumLayouts] = {
   [Nav] = {keys_nav, "latin", "nav", false},
   [Landscape] = {keys_landscape, "latin", "landscape", true},
   [LandscapeSpecial] = {keys_landscape_special, "latin", "landscapespecial", true},
+  [German] = {keys_german, "latin", "german", true},
   [ComposeA] = {keys_compose_a, "latin"},
   [ComposeE] = {keys_compose_e, "latin"},
   [ComposeY] = {keys_compose_y, "latin"},
@@ -231,6 +233,82 @@ static struct key keys_full[] = {
   {"b", "B", 1.0, Code, KEY_B, &layouts[ComposeB]},
   {"n", "N", 1.0, Code, KEY_N, &layouts[ComposeN]},
   {"m", "M", 1.0, Code, KEY_M, &layouts[ComposeM]},
+  {"⌫", "⌫", 1.5, Code, KEY_BACKSPACE, .scheme = 1},
+  {"", "", 0.0, EndRow},
+
+  {"⌨͕", "⌨͔", 1.5, NextLayer, .scheme = 1},
+  {"Cmp", "Cmp", 1.0, Compose, .scheme = 1},
+  {",", "'", 1.0, Code, KEY_COMMA, &layouts[ComposeMath]},
+  {"", "Tab", 4.0, Code, KEY_SPACE},
+  {".", "?", 1.0, Code, KEY_DOT, &layouts[ComposePunctuation]},
+  {"Enter", "Enter", 1.5, Code, KEY_ENTER, .scheme = 1},
+
+  /* end of layout */
+  {"", "", 0.0, Last},
+};
+
+/* glassine: German QWERTZ: y/z swapped, umlauts and sharp s as keys (Copy: unicode).
+ * The number row keeps the US shift symbols (the keys go through the latin keymap). */
+static struct key keys_german[] = {
+  {"Esc", "Esc", 1.0, Code, KEY_ESC, .scheme = 1},
+  {"Ctr", "Ctr", 1.0, Mod, Ctrl, .scheme = 1},
+  {"↑", "↑", 1.0, Code, KEY_UP, .scheme = 1},
+  {"↓", "↓", 1.0, Code, KEY_DOWN, .scheme = 1},
+  {"←", "←", 1.0, Code, KEY_LEFT, .scheme = 1},
+  {"→", "→", 1.0, Code, KEY_RIGHT, .scheme = 1},
+  {"'", "\"", 1.0, Code, KEY_APOSTROPHE, &layouts[ComposeBracket] },
+  {"-", "_", 1.0, Code, KEY_MINUS, &layouts[ComposeMath] },
+  {"/", ">", 1.0, Code, KEY_SLASH,  &layouts[ComposePunctuation] },
+  {"Tab", "Ins", 1.0, Code, KEY_TAB, .shift_code = KEY_INSERT, .scheme = 1},
+  {"", "", 0.0, EndRow},
+
+  {"1", "!", 1.0, Code, KEY_1},
+  {"2", "@", 1.0, Code, KEY_2},
+  {"3", "#", 1.0, Code, KEY_3},
+  {"4", "$", 1.0, Code, KEY_4},
+  {"5", "%", 1.0, Code, KEY_5},
+  {"6", "^", 1.0, Code, KEY_6},
+  {"7", "&", 1.0, Code, KEY_7},
+  {"8", "*", 1.0, Code, KEY_8},
+  {"9", "(", 1.0, Code, KEY_9, &layouts[ComposeBracket]},
+  {"0", ")", 1.0, Code, KEY_0, &layouts[ComposeBracket]},
+  {"", "", 0.0, EndRow},
+
+  {"q", "Q", 1.0, Code, KEY_Q, &layouts[Emoji]},
+  {"w", "W", 1.0, Code, KEY_W, &layouts[ComposeW]},
+  {"e", "E", 1.0, Code, KEY_E, &layouts[ComposeE]},
+  {"r", "R", 1.0, Code, KEY_R, &layouts[ComposeR]},
+  {"t", "T", 1.0, Code, KEY_T, &layouts[ComposeT]},
+  {"z", "Z", 1.0, Code, KEY_Z, &layouts[ComposeZ]},
+  {"u", "U", 1.0, Code, KEY_U, &layouts[ComposeU]},
+  {"i", "I", 1.0, Code, KEY_I, &layouts[ComposeI]},
+  {"o", "O", 1.0, Code, KEY_O, &layouts[ComposeO]},
+  {"p", "P", 1.0, Code, KEY_P, &layouts[ComposeP]},
+  {"ü", "Ü", 1.0, Copy, 0x00FC, 0, 0x00DC},
+  {"", "", 0.0, EndRow},
+
+  {"a", "A", 1.0, Code, KEY_A, &layouts[ComposeA]},
+  {"s", "S", 1.0, Code, KEY_S, &layouts[ComposeS]},
+  {"d", "D", 1.0, Code, KEY_D, &layouts[ComposeD]},
+  {"f", "F", 1.0, Code, KEY_F, &layouts[ComposeF]},
+  {"g", "G", 1.0, Code, KEY_G, &layouts[ComposeG]},
+  {"h", "H", 1.0, Code, KEY_H, &layouts[ComposeH]},
+  {"j", "J", 1.0, Code, KEY_J, &layouts[ComposeJ]},
+  {"k", "K", 1.0, Code, KEY_K, &layouts[ComposeK]},
+  {"l", "L", 1.0, Code, KEY_L, &layouts[ComposeL]},
+  {"ö", "Ö", 1.0, Copy, 0x00F6, 0, 0x00D6},
+  {"ä", "Ä", 1.0, Copy, 0x00E4, 0, 0x00C4},
+  {"", "", 0.0, EndRow},
+
+  {"⇧", "⇫", 1.5, Mod, Shift, .scheme = 1},
+  {"y", "Y", 1.0, Code, KEY_Y, &layouts[ComposeY]},
+  {"x", "X", 1.0, Code, KEY_X, &layouts[ComposeX]},
+  {"c", "C", 1.0, Code, KEY_C, &layouts[ComposeC]},
+  {"v", "V", 1.0, Code, KEY_V, &layouts[ComposeV]},
+  {"b", "B", 1.0, Code, KEY_B, &layouts[ComposeB]},
+  {"n", "N", 1.0, Code, KEY_N, &layouts[ComposeN]},
+  {"m", "M", 1.0, Code, KEY_M, &layouts[ComposeM]},
+  {"ß", "ẞ", 1.0, Copy, 0x00DF, 0, 0x1E9E},
   {"⌫", "⌫", 1.5, Code, KEY_BACKSPACE, .scheme = 1},
   {"", "", 0.0, EndRow},
 
