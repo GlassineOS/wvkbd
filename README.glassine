@@ -1,0 +1,21 @@
+GlassineOS wvkbd
+================
+
+This branch is the on-screen keyboard of GlassineOS (https://github.com/GlassineOS):
+wvkbd 0.16 (https://github.com/jjsullivan5196/wvkbd) plus two changes, one commit
+each:
+
+  - themable keys: --stroke, --stroke-sp, --stroke-width, --text-press,
+    --text-press-sp, --gap, --no-popup (the shell passes its theme's look)
+  - a German QWERTZ layer ("german") with umlauts
+
+Without the new options the keyboard behaves as upstream's.
+
+Branches:
+  glassine/0.16   what GlassineOS builds (the release Alpine 3.22 packaged)
+
+Build: as upstream (make; needs wayland, pango, cairo, xkbcommon, scdoc).
+
+The license is upstream's (GPL-3.0, LICENSE). Commits made with AI assistance
+carry an Assisted-by: trailer. They are not submitted upstream; see the
+GlassineOS contribution policy.
