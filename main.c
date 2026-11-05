@@ -710,6 +710,11 @@ usage(char *argv0)
     fprintf(stderr, "  --text [rrggbb|aa]     - Set color of text on keys\n");
     fprintf(stderr,
             "  --text-sp [rrggbb|aa]  - Set color of text on special keys\n");
+    fprintf(stderr, "  --stroke, --stroke-sp [rrggbb|aa] - glassine: key outline colors\n");
+    fprintf(stderr, "  --stroke-width [int]   - glassine: key outline width in pixels\n");
+    fprintf(stderr, "  --text-press, --text-press-sp [rrggbb|aa] - glassine: label of a pressed key\n");
+    fprintf(stderr, "  --gap [int]            - glassine: space around each key in pixels (2)\n");
+    fprintf(stderr, "  --no-popup             - glassine: no enlarged key above a pressed key\n");
     fprintf(stderr,
             "  --list-layers          - Print the list of available layers\n");
     fprintf(stderr,
@@ -961,6 +966,26 @@ main(int argc, char **argv)
                 exit(1);
             }
             height = landscape_height = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--stroke") || !strcmp(argv[i], "--stroke-sp") ||
+                   !strcmp(argv[i], "--text-press") || !strcmp(argv[i], "--text-press-sp")) {
+            if (i >= argc - 1) {
+                usage(argv[0]);
+                exit(1);
+            }
+            int sp = strstr(argv[i], "-sp") != NULL;
+            uint8_t *c = !strncmp(argv[i], "--stroke", 8) ? keyboard.schemes[sp].stroke.bgra
+                                                          : keyboard.schemes[sp].text_high.bgra;
+            c[3] = 255;                 /* rrggbb: opaque (these start at alpha 0 = off) */
+            set_kbd_colors(c, argv[++i]);
+        } else if (!strcmp(argv[i], "--stroke-width") || !strcmp(argv[i], "--gap")) {
+            if (i >= argc - 1) {
+                usage(argv[0]);
+                exit(1);
+            }
+            int *v = !strcmp(argv[i], "--gap") ? &kbd_key_border : &kbd_stroke_width;
+            *v = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--no-popup")) {
+            kbd_no_popup = true;
         } else if (!strcmp(argv[i], "-R")) {
             if (i >= argc - 1) {
                 usage(argv[0]);

@@ -10,6 +10,25 @@
 
 #define MAX_LAYERS 25
 
+/* glassine: themable keys (outline, gap, pressed label), no press popup */
+int kbd_key_border = 2;
+int kbd_stroke_width = 0;
+bool kbd_no_popup = false;
+
+static void
+draw_key_face(struct drwsurf *ds, struct key *k, uint32_t y, struct clr_scheme *sc,
+              Color fill)
+{
+    int sw = sc->stroke.bgra[3] ? kbd_stroke_width : 0;
+    if (sw > 0 && k->w > 2 * (KBD_KEY_BORDER + sw) && k->h > 2 * (KBD_KEY_BORDER + sw)) {
+        draw_inset(ds, k->x, y, k->w, k->h, KBD_KEY_BORDER, sc->stroke, sc->rounding);
+        int r = sc->rounding > sw ? sc->rounding - sw : 0;
+        draw_inset(ds, k->x, y, k->w, k->h, KBD_KEY_BORDER + sw, fill, r);
+    } else {
+        draw_inset(ds, k->x, y, k->w, k->h, KBD_KEY_BORDER, fill, sc->rounding);
+    }
+}
+
 /* lazy die macro */
 #define die(...)                                                               \
     fprintf(stderr, __VA_ARGS__);                                              \
@@ -573,12 +592,10 @@ kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
     switch (type) {
     case None:
     case Unpress:
-        draw_inset(kb->surf, k->x, k->y, k->w, k->h, KBD_KEY_BORDER,
-                   scheme->fg, scheme->rounding);
+        draw_key_face(kb->surf, k, k->y, scheme, scheme->fg);
         break;
     case Press:
-        draw_inset(kb->surf, k->x, k->y, k->w, k->h, KBD_KEY_BORDER,
-                   scheme->high, scheme->rounding);
+        draw_key_face(kb->surf, k, k->y, scheme, scheme->high);
         break;
     case Swipe:
         draw_over_inset(kb->surf, k->x, k->y, k->w, k->h, KBD_KEY_BORDER,
@@ -586,11 +603,12 @@ kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
         break;
     }
 
-    drw_draw_text(kb->surf, scheme->text, k->x, k->y, k->w, k->h,
+    Color text = (type == Press && scheme->text_high.bgra[3]) ? scheme->text_high : scheme->text;
+    drw_draw_text(kb->surf, text, k->x, k->y, k->w, k->h,
                   KBD_KEY_BORDER, label, scheme->font_description);
     wl_surface_damage(kb->surf->surf, k->x, k->y, k->w, k->h);
 
-    if (type == Press || type == Unpress) {
+    if ((type == Press || type == Unpress) && !kbd_no_popup) {
         kbd_clear_last_popup(kb);
 
         kb->last_popup_x = k->x;

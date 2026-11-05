@@ -54,6 +54,8 @@ struct clr_scheme {
 	Color high;
 	Color swipe;
 	Color text;
+	Color stroke;       /* glassine: key outline (--stroke), alpha 0 = none */
+	Color text_high;    /* glassine: label of a pressed key (--text-press), alpha 0 = text */
 	char *font;
 	int rounding;
 	PangoFontDescription *font_description;
@@ -138,6 +140,8 @@ void kbd_press_key(struct kbd *kb, struct key *k, uint32_t time);
 void kbd_print_key_stdout(struct kbd *kb, struct key *k);
 void kbd_clear_last_popup(struct kbd *kb);
 void kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type);
+extern int kbd_stroke_width;            /* glassine: --stroke-width (px) */
+extern bool kbd_no_popup;               /* glassine: --no-popup */
 void kbd_draw_layout(struct kbd *kb);
 void kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount);
 uint8_t kbd_get_rows(struct layout *l);
