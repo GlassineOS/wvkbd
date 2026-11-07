@@ -1053,6 +1053,7 @@ main(int argc, char **argv)
                 usage(argv[0]);
                 exit(1);
             }
+            keyboard.schemes[0].text_swipe.bgra[3] = 255; /* glassine: rrggbb is opaque */
             set_kbd_colors(keyboard.schemes[0].text_swipe.bgra, argv[++i]);
         } else if ((!strcmp(argv[i], "-text-swipe-sp")) ||
                    (!strcmp(argv[i], "--text-swipe-sp"))) {
@@ -1060,6 +1061,7 @@ main(int argc, char **argv)
                 usage(argv[0]);
                 exit(1);
             }
+            keyboard.schemes[1].text_swipe.bgra[3] = 255; /* glassine: rrggbb is opaque */
             set_kbd_colors(keyboard.schemes[1].text_swipe.bgra, argv[++i]);
         } else if (!strcmp(argv[i], "-H")) {
             if (i >= argc - 1) {

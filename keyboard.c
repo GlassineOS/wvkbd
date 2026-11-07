@@ -686,7 +686,8 @@ kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
     case Swipe:
         draw_over_inset(kb->surf, k->x, k->y, k->w, k->h, KBD_KEY_BORDER,
                         scheme->swipe, scheme->rounding);
-        drw_draw_text(kb->surf, scheme->text_swipe, k->x, k->y, k->w, k->h,
+        drw_draw_text(kb->surf,
+                  scheme->text_swipe.bgra[3] ? scheme->text_swipe : scheme->text, k->x, k->y, k->w, k->h,
                   KBD_KEY_BORDER, label, scheme->font_description);
         break;
     default:

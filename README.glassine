@@ -8,7 +8,8 @@ each:
   - themable keys: --stroke, --stroke-sp, --stroke-width and --gap (the shell
     passes its theme's look). The pressed-key label (--text-press, --text-press-sp)
     and --no-popup were added here for 0.16; upstream has them since, so this
-    branch uses upstream's.
+    branch uses upstream's. A swiped key's label is --text's unless --text-swipe
+    is given (upstream's default is white), as it was in 0.16.
   - a German QWERTZ layer ("german") with umlauts
 
 Without the new options the keyboard behaves as upstream's.

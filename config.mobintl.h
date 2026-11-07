@@ -15,7 +15,7 @@ struct clr_scheme schemes[] = {
   .swipe = {.bgra = {100, 255, 100, 64}},
   .text = {.color = UINT32_MAX},
   .text_press = {.color = UINT32_MAX},
-  .text_swipe = {.color = UINT32_MAX},
+  .text_swipe = {.color = 0}, /* glassine: alpha 0 = the label of --text, as in 0.16 */
   .font = DEFAULT_FONT,
   .rounding = DEFAULT_ROUNDING,
 },
@@ -26,7 +26,7 @@ struct clr_scheme schemes[] = {
   .high = {.bgra = {100, 100, 100, transparency}},
   .swipe = {.bgra = {100, 255, 100, 64}},
   .text_press = {.color = UINT32_MAX},
-  .text_swipe = {.color = UINT32_MAX},
+  .text_swipe = {.color = 0}, /* glassine: alpha 0 = the label of --text, as in 0.16 */
   .text = {.color = UINT32_MAX},
   .font = DEFAULT_FONT,
   .rounding = DEFAULT_ROUNDING,
