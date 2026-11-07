@@ -1,0 +1,17 @@
+name: glassine-build
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: build on Alpine
+        run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:3.24 sh -euc '
+            apk add -q build-base wayland-dev wayland-protocols pango-dev cairo-dev libxkbcommon-dev scdoc
+            make
+            ./wvkbd-mobintl --help 2>&1 | grep -q -- --stroke-width
+            ./wvkbd-mobintl --list-layers | grep -qx german
+            make clean'
