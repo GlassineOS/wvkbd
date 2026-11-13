@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <ctype.h>
 #include <time.h>
+#include <sys/timerfd.h>
 #include "keyboard.h"
 #include <linux/input-event-codes.h>
 
@@ -12,6 +13,28 @@
 #include "os-compatibility.h"
 
 #define MAX_LAYERS 25
+
+/* glassine: long press (see struct kbd). The timer is main.c's timerfd */
+int kbd_hold_timer_fd = -1;
+static bool hold_skip_press_draw;   /* the held key is drawn pressed already */
+
+static void
+hold_arm(int ms)
+{
+    if (kbd_hold_timer_fd < 0) return;
+    struct itimerspec t = { .it_value = { ms / 1000, (long)(ms % 1000) * 1000000L } };
+    timerfd_settime(kbd_hold_timer_fd, 0, &t, NULL);
+}
+
+static void
+hold_disarm(void)
+{
+    if (kbd_hold_timer_fd < 0) return;
+    struct itimerspec t = { 0 };
+    timerfd_settime(kbd_hold_timer_fd, 0, &t, NULL);
+}
+
+static void kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time);
 
 /* glassine: themable keys (outline, gap) */
 int kbd_key_border = 2;
@@ -317,6 +340,21 @@ kbd_unpress_key(struct kbd *kb, uint32_t time)
 {
     bool unlatch_shift, unlatch_ctrl, unlatch_alt, unlatch_super, unlatch_altgr, unlatch_tab;
     unlatch_shift = unlatch_ctrl = unlatch_alt = unlatch_super = unlatch_altgr = unlatch_tab = false;
+    if (kb->hold_key) {
+        /* glassine: a held key ends: the alternate was typed (only redraw it),
+         * or it was a tap (type its own character now, then release it below) */
+        struct key *k = kb->hold_key;
+        kb->hold_key = NULL;
+        hold_disarm();
+        if (kb->hold_fired) {
+            kb->hold_fired = false;
+            kbd_draw_key(kb, k, Unpress);
+            return;
+        }
+        hold_skip_press_draw = true;
+        kbd_press_key_now(kb, k, time);
+        hold_skip_press_draw = false;
+    }
     if (kb->last_press) {
         unlatch_shift = (kb->mods & Shift) == Shift;
         unlatch_ctrl = (kb->mods & Ctrl) == Ctrl;
@@ -432,8 +470,50 @@ kbd_motion_key(struct kbd *kb, uint32_t time, uint32_t x, uint32_t y)
     kbd_clear_last_popup(kb);
 }
 
+/* glassine: a key with a hold alternate waits (see struct kbd) */
 void
 kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+{
+    if (k->hold && kb->hold_ms > 0 && !kb->compose && (k->type == Code || k->type == Copy)) {
+        kb->hold_key = k;
+        kb->hold_fired = false;
+        kb->hold_offset = time - monotime();
+        kbd_draw_key(kb, k, Press);
+        hold_arm(kb->hold_ms);
+        return;
+    }
+    kbd_press_key_now(kb, k, time);
+}
+
+/* glassine: the timer ran out with the key still held: type its alternate
+ * (as a Copy key, through a temporary keymap). No redraw: the key stays drawn
+ * pressed until it is released, as for a tap */
+void
+kbd_hold_fire(struct kbd *kb)
+{
+    if (!kb->hold_key || kb->hold_fired) return;
+    struct key *k = kb->hold_key;
+    uint32_t time = (uint32_t)(monotime() + kb->hold_offset);
+    kb->hold_fired = true;
+    if (kb->debug) fprintf(stderr, "hold: %s -> U+%04X\n", k->label, k->hold);
+    create_and_upload_keymap(kb, kb->layout->keymap_name, k->hold);
+    zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
+    zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, WL_KEYBOARD_KEY_STATE_PRESSED);   // COMP key
+    zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, WL_KEYBOARD_KEY_STATE_RELEASED);
+    if ((kb->print || kb->print_intersect) && k->hold_label) {
+        printf("%s", k->hold_label);
+        fflush(stdout);
+    }
+    if (kb->mods & Shift) {     /* a latched shift ends with the character, as after a tap */
+        kb->mods ^= Shift;
+        zwp_virtual_keyboard_v1_key_mods(kb->vkbd, time, Shift, WL_KEYBOARD_KEY_STATE_RELEASED);
+        zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
+        kbd_draw_layout(kb);
+    }
+}
+
+static void
+kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time)
 {
     if ((kb->compose == 1) && (k->type != Compose) && (k->type != Mod)) {
         if ((k->type == NextLayer) || (k->type == BackLayer) ||
@@ -667,6 +747,7 @@ kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
         fprintf(stderr, "Draw key +%d+%d %dx%d -> %s\n", k->x, k->y, k->w, k->h,
                 label);
     struct clr_scheme *scheme = &kb->schemes[k->scheme];
+    if (hold_skip_press_draw && type == Press && k == kb->last_press) return;
 
     switch (type) {
     case None:
@@ -693,6 +774,15 @@ kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
     default:
         drw_draw_text(kb->surf, scheme->text, k->x, k->y, k->w, k->h,
                   KBD_KEY_BORDER, label, scheme->font_description);
+    }
+
+    /* glassine: the hold alternate, small in the top right corner */
+    if (k->hold_label && kb->hold_ms > 0 && scheme->hint_font_description &&
+        (type == None || type == Unpress || type == Press) && k->w > 4 * KBD_KEY_BORDER) {
+        Color c = (type == Press && kb->show_highlight) ? scheme->text_press : scheme->text;
+        uint32_t hw = k->w * 45 / 100, hh = k->h * 40 / 100;
+        drw_draw_text(kb->surf, c, k->x + k->w - hw - KBD_KEY_BORDER, k->y + KBD_KEY_BORDER,
+                      hw, hh, 0, k->hold_label, scheme->hint_font_description);
     }
 
 
