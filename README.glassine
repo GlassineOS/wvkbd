@@ -12,7 +12,7 @@ wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus these changes:
   - a German QWERTZ layer ("german") with umlauts
   - long press (--hold MS, default 400, 0: off): a held key types the
     alternate printed in its corner (":" on ".", ";" on ",", symbols on the
-    letters). Only the German layer has alternates.
+    letters), on the full, landscape and German layers.
   - the keyboard as the input method (GlassineOS/shell spec 006), all behind
     --im: text is committed to the focused text field (zwp_input_method_v2),
     Backspace deletes through it where the field reports its text, other keys
