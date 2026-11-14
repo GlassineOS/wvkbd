@@ -500,6 +500,179 @@ static void test_osk(void)
 
 /* a word is learned once per finish: Backspace back into a learned word (the space
  * after a pick or after a typed word deleted), then Enter or a space, learns nothing more */
+
+/* ---- late reports and picks: what real toolkits send (recorded under sway) ---- */
+
+/* the app reports text (cursor and anchor in bytes) with a cause */
+static void say(struct osk *o, const char *text, uint32_t cursor, uint32_t anchor, uint32_t cause)
+{
+    osk_im_surrounding(o, text, cursor, anchor);
+    osk_im_cause(o, cause);
+    osk_im_done(o, now_ms());
+}
+
+/* tap a word on the strip (the strip set to just this word) */
+static void tap_word(struct osk *o, const char *w)
+{
+    o->s.mode = STRIP_WORDS;
+    memset(&o->s.words, 0, sizeof o->s.words);
+    snprintf(o->s.words.word[0], PC_WORD_MAX, "%s", w);
+    snprintf(o->s.words.lang[0], PC_LANG_MAX, "en");
+    o->s.words.n = 1;
+    o->held = 0;
+    osk_strip_up(o, now_ms());
+}
+
+/* the sends since the last call: sync commits ("0|") counted apart */
+static int sends_since(int e0)
+{
+    return edits - e0;
+}
+
+static void test_late_reports(void)
+{
+    size_t n;
+    int e0;
+    /* GTK: after a pick, a report half-way (the delete done) and then the new text */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "");
+    type(&o, "hello", true, IM_P_NORMAL, 0);
+    tap_word(&o, "Hello");
+    CHECK_STR("gtk: the pick replaces the typed word", last_send, "5|Hello ");
+    say(&o, "", 0, 0, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("gtk: the half-way report is late", imf_before(&o.f, &n), "Hello ");
+    say(&o, "Hello ", 6, 6, IM_CAUSE_INPUT_METHOD);
+    tap_word(&o, "world");
+    CHECK_STR("gtk: a next word: one space between", app, "Hello world ");
+    osk_finish(&o);
+
+    /* Firefox: the text from before the edit first (cause input method), then the new
+     * text (cause other); after a delete only the old text, twice */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "");
+    const char *steps[] = { "", "h", "he", "hel", "hell", "hello" };
+    for (int i = 1; i < 6; i++) {
+        char c[2] = { steps[i][i - 1], 0 };
+        osk_text(&o, c, now_ms());
+        say(&o, steps[i - 1], i - 1, i - 1, IM_CAUSE_INPUT_METHOD);
+        say(&o, steps[i], i, i, IM_CAUSE_OTHER);
+    }
+    snprintf(app, sizeof app, "hello");
+    CHECK_STR("firefox: the view follows the typing", imf_before(&o.f, &n), "hello");
+    tap_word(&o, "Hello");
+    say(&o, "hello", 5, 5, IM_CAUSE_INPUT_METHOD);
+    say(&o, "hello", 5, 5, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("firefox: the old text after a pick is late", imf_before(&o.f, &n), "Hello ");
+    tap_word(&o, "world");
+    CHECK_STR("firefox: pick, then a next word: no word deleted", app, "Hello world ");
+    osk_finish(&o);
+
+    /* Chromium: every report one edit behind, the newest text only after the next
+     * commit (the sync); with auto capitalization */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, IM_H_AUTO_CAPITALIZATION, "");
+    osk_text(&o, "H", now_ms());
+    e0 = edits;
+    say(&o, "", 0, 0, IM_CAUSE_INPUT_METHOD);
+    CHECK("chromium: a late report: no capital again", !osk_shifted(&o));
+    CHECK_STR("chromium: ... the view kept", imf_before(&o.f, &n), "H");
+    CHECK_INT("chromium: ... nothing sent at once", sends_since(e0), 0);
+    run(&o, OSK_SYNC_MS + 20);
+    CHECK_STR("chromium: ... then a fresh report asked for (an empty commit)", last_send, "0|");
+    CHECK_INT("chromium: ... once", sends_since(e0), 1);
+    say(&o, "", 0, 0, IM_CAUSE_INPUT_METHOD);
+    run(&o, OSK_SYNC_MS + 20);
+    CHECK_INT("chromium: late again: asked again, spaced", sends_since(e0), 2);
+    say(&o, "H", 1, 1, IM_CAUSE_INPUT_METHOD);
+    run(&o, OSK_SYNC_MS + 20);
+    CHECK_INT("chromium: the edit arrived: no more asking", sends_since(e0), 2);
+    osk_text(&o, "e", now_ms());
+    say(&o, "H", 1, 1, IM_CAUSE_INPUT_METHOD);
+    say(&o, "He", 2, 2, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("chromium: typing followed", imf_before(&o.f, &n), "He");
+    e0 = edits;
+    osk_text(&o, "y", now_ms());
+    run(&o, IM_INFLIGHT_MS + 50);
+    say(&o, "He", 2, 2, IM_CAUSE_INPUT_METHOD);
+    run(&o, OSK_SYNC_MS + 20);
+    CHECK_INT("chromium: a report after IM_INFLIGHT_MS: the field's text, nothing asked", sends_since(e0), 1);
+    CHECK_STR("chromium: ... taken", imf_before(&o.f, &n), "He");
+    osk_finish(&o);
+
+    /* a browser address bar: a URL field with an inline completion selected after the
+     * typed text (cursor 4, anchor 7) */
+    fresh("ok");
+    focus(&o, IM_P_URL, 0, "");
+    type(&o, "hell", false, IM_P_URL, 0);
+    say(&o, "hellweg", 4, 7, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("omnibox: the typed text before the cursor", imf_before(&o.f, &n), "hell");
+    snprintf(app, sizeof app, "hell");
+    tap_word(&o, "Hello");
+    CHECK_STR("omnibox: a pick over a selection: first the text alone, over it", last_send, "0|Hello ");
+    snprintf(app, sizeof app, "hellHello ");
+    say(&o, "hellweg", 4, 7, IM_CAUSE_INPUT_METHOD);  /* late */
+    CHECK_STR("omnibox: ... a late report: nothing more yet", last_send, "0|Hello ");
+    run(&o, OSK_SYNC_MS + 20);
+    CHECK_STR("omnibox: ... the app asked for its text", last_send, "0|");
+    say(&o, "hellHello ", 10, 10, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("omnibox: ... then the typed word and the text replaced by the text", last_send, "10|Hello ");
+    CHECK_STR("omnibox: ... the field", app, "Hello ");
+    say(&o, "Hello ", 6, 6, IM_CAUSE_INPUT_METHOD);
+    tap_word(&o, "World");
+    CHECK_STR("omnibox: a next word: one space between", app, "Hello World ");
+    osk_finish(&o);
+
+    /* a pick over a selection whose first step the app never reports: no second step */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "");
+    type(&o, "wor", true, IM_P_NORMAL, 0);
+    say(&o, "word", 3, 4, IM_CAUSE_INPUT_METHOD);
+    tap_word(&o, "world");
+    e0 = edits;
+    run(&o, OSK_PICK_WAIT_MS + 50);
+    CHECK("selection: unreported: no second step", strncmp(last_send, "9|", 2) && o.pick_until == 0);
+    osk_finish(&o);
+
+    /* the space rules */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "Hello");
+    osk_text(&o, ",", now_ms());
+    report(&o, IM_P_NORMAL, 0);
+    tap_word(&o, "world");
+    CHECK_STR("space: after a comma one before the word", app, "Hello, world ");
+    osk_finish(&o);
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "say (");
+    tap_word(&o, "world");
+    CHECK_STR("space: none after an opening bracket", app, "say (world ");
+    osk_finish(&o);
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "route 66");
+    tap_word(&o, "is");
+    CHECK_STR("space: a next word after a digit gets one before it", app, "route 66 is ");
+    osk_finish(&o);
+    fresh("ok");
+    focus(&o, IM_P_URL, 0, "github.c");
+    tap_word(&o, "com");
+    CHECK_STR("space: an address in a URL field: none after", app, "github.com");
+    osk_finish(&o);
+    fresh("ok");
+    focus(&o, IM_P_URL, 0, "https://exam");
+    tap_word(&o, "example");
+    CHECK_STR("space: a scheme makes it an address", app, "https://example");
+    osk_finish(&o);
+    fresh("ok");
+    focus(&o, IM_P_URL, 0, "weather in ber");
+    tap_word(&o, "Berlin");
+    CHECK_STR("space: a search in a URL field gets its space", app, "weather in Berlin ");
+    osk_finish(&o);
+    fresh("ok");
+    focus(&o, IM_P_EMAIL, 0, "ana");
+    tap_word(&o, "anna");
+    CHECK_STR("space: an email field: none", app, "anna");
+    osk_finish(&o);
+}
+
 static void test_learn_once(void)
 {
     struct strip_item it[STRIP_ITEMS];
@@ -638,6 +811,7 @@ int main(int argc, char **argv)
     test_im();
     test_strip();
     test_osk();
+    test_late_reports();
     test_learn_once();
     test_settings();
     unlink(logpath);

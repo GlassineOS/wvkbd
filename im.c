@@ -20,19 +20,56 @@ static void view_clear(struct im_field *f)
 {
     memset(f->before, 0, sizeof f->before);     /* nothing of a field stays in memory */
     f->len = 0;
-    f->inflight = 0;
     f->selection = false;
+    memset(f->old, 0, sizeof f->old);
+    f->n_old = 0;
+    f->late = false;
+}
+
+/* the part of s[0..n) a view keeps: its last IM_VIEW_MAX bytes, cut at a code point */
+static const char *view_tail(const char *s, size_t *n)
+{
+    if (*n > IM_VIEW_MAX) {
+        size_t cut = *n - IM_VIEW_MAX;
+        while (cut < *n && ((unsigned char)s[cut] & 0xC0) == 0x80) cut++;
+        s += cut;
+        *n -= cut;
+    }
+    return s;
+}
+
+static uint64_t text_hash(const char *s, size_t n)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 0x100000001b3ULL;
+    return h;
+}
+
+/* the field had s[0..n) during an own edit on its way */
+static void old_add(struct im_field *f, const char *s, size_t n)
+{
+    s = view_tail(s, &n);
+    if (f->n_old == IM_OLD_MAX) {
+        memmove(f->old, f->old + 1, sizeof f->old[0] * (IM_OLD_MAX - 1));
+        f->n_old--;
+    }
+    f->old[f->n_old].h = text_hash(s, n);
+    f->old[f->n_old].len = n;
+    f->n_old++;
+}
+
+static bool old_has(const struct im_field *f, const char *s, size_t n)
+{
+    s = view_tail(s, &n);
+    uint64_t h = text_hash(s, n);
+    for (int i = 0; i < f->n_old; i++) if (f->old[i].len == n && f->old[i].h == h) return true;
+    return false;
 }
 
 /* the view becomes s[0..n): its last IM_VIEW_MAX bytes, cut at a code point */
 static void view_set(struct im_field *f, const char *s, size_t n)
 {
-    if (n > IM_VIEW_MAX) {
-        size_t cut = n - IM_VIEW_MAX;
-        while (cut < n && ((unsigned char)s[cut] & 0xC0) == 0x80) cut++;
-        s += cut;
-        n -= cut;
-    }
+    s = view_tail(s, &n);
     memmove(f->before, s, n);
     f->before[n] = 0;
     f->len = n;
@@ -115,17 +152,18 @@ int imf_done(struct im_field *f, int64_t now)
     }
     if (imf_private(f)) goto out;                    /* nothing of a private field is kept */
     if (f->surrounding && f->p.text) {
-        bool other = f->p.cause == IM_CAUSE_OTHER;
-        bool keep = false;
-        if (!other && f->inflight > 0 && now - f->last_edit_ms < IM_INFLIGHT_MS)
-            keep = --f->inflight > 0;               /* a report from before an own edit */
-        else
-            f->inflight = 0;
-        if (other) f->inflight = 0;
-        if (!keep) {
-            size_t c = f->p.cursor;
-            bool sel = f->p.anchor != f->p.cursor;
-            if (c != f->len || memcmp(f->before, f->p.t, c) || sel != f->selection) r |= IM_VIEW;
+        size_t c = f->p.cursor;
+        bool sel = f->p.anchor != f->p.cursor;
+        bool waiting = f->n_old > 0 && now - f->last_edit_ms < IM_INFLIGHT_MS;
+        size_t vn = c;
+        const char *vt = view_tail(f->p.t, &vn);
+        bool same = vn == f->len && !memcmp(f->before, vt, vn);
+        if (f->p.cause != IM_CAUSE_OTHER && waiting && !same && old_has(f, f->p.t, c)) {
+            f->late = true;                         /* ignored: a fresh one is asked for */
+        } else {
+            f->n_old = 0;                           /* the own edits arrived, or the */
+            f->late = false;                        /* app changed the text itself */
+            if (!same || sel != f->selection) r |= IM_VIEW;
             view_set(f, f->p.t, c);
             f->selection = sel;
         }
@@ -188,6 +226,10 @@ void imf_edit(struct im_field *f, size_t del, const char *text, int64_t now)
     if (!f->active || imf_private(f)) return;
     if (del > f->len) del = f->len;
     size_t n = f->len - del, t = strlen(text);
+    if (f->surrounding) {               /* the texts a late report can still show */
+        old_add(f, f->before, f->len);
+        if (del && t) old_add(f, f->before, n);
+    }
     char buf[IM_VIEW_MAX * 2 + 2];
     if (t > IM_VIEW_MAX) t = IM_VIEW_MAX;
     memcpy(buf, f->before, n);
@@ -196,7 +238,6 @@ void imf_edit(struct im_field *f, size_t del, const char *text, int64_t now)
     memset(buf, 0, n + t);
     f->selection = false;
     if (f->surrounding) {
-        f->inflight++;
         f->last_edit_ms = now;
     }
 }
@@ -211,6 +252,21 @@ void imf_key_backspace(struct im_field *f)
     if (f->surrounding || !f->len) return;
     f->len = tr_prev(f->before, f->len);
     memset(f->before + f->len, 0, sizeof f->before - f->len);
+}
+
+bool imf_late(const struct im_field *f, int64_t now)
+{
+    return f->late && f->n_old > 0 && now - f->last_edit_ms < IM_INFLIGHT_MS;
+}
+
+void imf_asked(struct im_field *f)
+{
+    f->late = false;
+}
+
+bool imf_settled(const struct im_field *f)
+{
+    return f->active && f->surrounding && f->n_old == 0 && !f->selection;
 }
 
 const char *imf_before(const struct im_field *f, size_t *len)

@@ -10,6 +10,7 @@
 #define KEY_KPENTER_ 96
 
 static void refresh(struct osk *o, int64_t now);
+static void pick_second(struct osk *o, int64_t now);
 
 static void got_words(void *d, const struct pc_words *w)
 {
@@ -81,11 +82,6 @@ static bool want_predictor(const struct osk *o)
     return o->predict_on && o->suggestions && o->f.active && !imf_private(&o->f) && imf_suggests(&o->f);
 }
 
-static bool address(const struct osk *o)
-{
-    return o->f.purpose == IM_P_EMAIL || o->f.purpose == IM_P_URL;
-}
-
 static void refresh(struct osk *o, int64_t now)
 {
     struct strip n = o->s;
@@ -140,32 +136,31 @@ static void ask_words(struct osk *o, int64_t now, bool force)
 
 /* where a word starts, for the learned mark: the text before it (its last 256 bytes, so a
  * field that reports only part of a long text still gives the same place) */
-static uint64_t word_place(const struct osk *o, size_t ws)
+static uint64_t word_place(const char *b, size_t ws)
 {
-    size_t len;
-    const char *b = imf_before(&o->f, &len);
     size_t from = ws > 256 ? ws - 256 : 0;
     return fnv(0xcbf29ce484222325ULL, b + from, ws - from);
 }
 
 static bool learned_here(const struct osk *o, size_t ws, const char *word, size_t wl)
 {
-    return o->learned[0] && strlen(o->learned) == wl && !memcmp(o->learned, word, wl) &&
-           o->learned_at == word_place(o, ws);
-}
-
-static void learn(struct osk *o, size_t ws, const char *word, size_t wl, const char *picked, int64_t now)
-{
-    if (!want_predictor(o)) return;
     size_t len;
     const char *b = imf_before(&o->f, &len);
+    return o->learned[0] && strlen(o->learned) == wl && !memcmp(o->learned, word, wl) &&
+           o->learned_at == word_place(b, ws);
+}
+
+/* learn word, typed or picked after the text b[0..ws) */
+static void learn(struct osk *o, const char *b, size_t ws, const char *word, size_t wl, const char *picked, int64_t now)
+{
+    if (!want_predictor(o)) return;
     char fld[160];
     imf_field_name(&o->f, fld, sizeof fld);
     pc_learn(&o->pc, o->langs, fld, b, ws, word, wl, picked, now);
     if (wl < sizeof o->learned) {
         memcpy(o->learned, word, wl);
         o->learned[wl] = 0;
-        o->learned_at = word_place(o, ws);
+        o->learned_at = word_place(b, ws);
     } else {
         o->learned[0] = 0;
     }
@@ -177,7 +172,7 @@ static void finish_word(struct osk *o, int64_t now)
 {
     size_t len, ws = imf_word_start(&o->f);
     const char *b = imf_before(&o->f, &len);
-    if (ws < len && !learned_here(o, ws, b + ws, len - ws)) learn(o, ws, b + ws, len - ws, "", now);
+    if (ws < len && !learned_here(o, ws, b + ws, len - ws)) learn(o, b, ws, b + ws, len - ws, "", now);
 }
 
 static void update_shift(struct osk *o)
@@ -224,6 +219,7 @@ void osk_im_new(struct osk *o) { o->f.serial = 0; }
 void osk_im_done(struct osk *o, int64_t now)
 {
     int r = imf_done(&o->f, now);
+    if (imf_late(&o->f, now) && !o->sync_at) o->sync_at = now + OSK_SYNC_MS;
     if (r & IM_VIEW) o->learned[0] = 0; /* changed by other means: another place */
     if (r & (IM_FOCUS_OFF | IM_FOCUS_ON)) {
         o->words.n = 0;
@@ -231,6 +227,9 @@ void osk_im_done(struct osk *o, int64_t now)
         o->learned[0] = 0;
         o->held = -1;
         o->bs_down = false;
+        o->sync_at = 0;
+        o->pick_until = 0;
+        memset(o->pick_text, 0, sizeof o->pick_text);
         pc_forget(&o->pc);
     }
     if (r & IM_FOCUS_OFF) {
@@ -245,6 +244,7 @@ void osk_im_done(struct osk *o, int64_t now)
     }
     if ((r & IM_TYPE) && o->f.active && o->ops->keys) o->ops->keys(o->d, keys_for(&o->f));
     if (r) after_edit(o, now);
+    if (o->pick_until && imf_settled(&o->f)) pick_second(o, now);
 }
 
 void osk_visible(struct osk *o, bool on, int64_t now)
@@ -320,28 +320,102 @@ bool osk_shifted(const struct osk *o)
     return o->autoshift;
 }
 
-/* a word picked from the strip: it replaces the word being typed, as one edit */
+/* the text being typed looks like an address: the text since the last space before the
+ * word being typed has a . / : or @ */
+static bool address_like(const char *b, size_t ws)
+{
+    size_t i = ws;
+    while (i > 0 && b[i - 1] != ' ' && b[i - 1] != '\t' && b[i - 1] != '\n') i--;
+    for (; i < ws; i++) if (strchr("./:@", b[i])) return true;
+    return false;
+}
+
+/* punctuation a word follows with a space between: what ends a clause or closes a
+ * bracket or a typographic quote (not an opening one, a dash, a slash or a straight
+ * quote, which open as often as they close) */
+static bool after_space(uint32_t c)
+{
+    return (c < 0x80 && strchr(",.;:!?)]}", (int)c) && c) || c == 0x201D || c == 0x2019 ||
+           c == 0xBB || c == 0x2026;
+}
+
+/* a word picked from the strip, as one edit: it replaces the word being typed at the
+ * cursor; with none there (a next word) right after a letter, a digit or punctuation
+ * that ends something (after_space), a space goes before it. A space follows it, except
+ * in an email field (it holds addresses) and in a URL field where the text being typed
+ * looks like an address (address_like): a URL field is also where a browser takes a
+ * search, and a plain word there gets its space. */
 static void pick(struct osk *o, const char *word, const char *lang, int64_t now)
 {
     if (!o->f.active || imf_private(&o->f) || !*word) return;
     size_t len, ws = imf_word_start(&o->f);
     const char *b = imf_before(&o->f, &len);
-    char text[PC_WORD_MAX + 2];
-    snprintf(text, sizeof text, "%s", word);
-    if (ws < len) {                     /* a capital typed stays a capital */
-        uint32_t p, w;
-        tr_dec(b + ws, len - ws, &p);
-        int wl = tr_dec(text, strlen(text), &w);
-        char up[4];
-        int ul = tr_enc(tr_upper(w), up);
-        if (tr_is_upper(p) && !tr_is_upper(w) && ul == wl) memcpy(text, up, ul);
+    bool addr = o->f.purpose == IM_P_EMAIL || (o->f.purpose == IM_P_URL && address_like(b, ws));
+    bool lead = false;
+    if (ws == len && len && !addr) {
+        uint32_t c;
+        size_t p = tr_prev(b, len);
+        tr_dec(b + p, len - p, &c);
+        lead = tr_letter(c) || (c >= '0' && c <= '9') || after_space(c);
     }
-    learn(o, ws, text, strlen(text), lang, now);
-    if (!address(o)) strcat(text, " ");
+    char w[PC_WORD_MAX + 1];
+    snprintf(w, sizeof w, "%s", word);
+    if (ws < len) {                     /* a capital typed stays a capital */
+        uint32_t p, c;
+        tr_dec(b + ws, len - ws, &p);
+        int wl = tr_dec(w, strlen(w), &c);
+        char up[4];
+        int ul = tr_enc(tr_upper(c), up);
+        if (tr_is_upper(p) && !tr_is_upper(c) && ul == wl) memcpy(w, up, ul);
+    }
+    if (lead) {                         /* learned after the space it gets */
+        char ctx[IM_VIEW_MAX + 2];
+        memcpy(ctx, b, len);
+        ctx[len] = ' ';
+        learn(o, ctx, len + 1, w, strlen(w), lang, now);
+        memset(ctx, 0, len + 1);
+    } else {
+        learn(o, b, ws, w, strlen(w), lang, now);
+    }
+    char text[PC_WORD_MAX + 3];
+    snprintf(text, sizeof text, "%s%s%s", lead ? " " : "", w, addr ? "" : " ");
     uint32_t del = (uint32_t)(len - ws);
+    if (o->f.surrounding && o->f.selection && del) {
+        /* a selection (a browser's address bar selects its own completion after the
+         * typed text): apps resolve a delete around a selection differently, but every
+         * app replaces a selection with inserted text. So first the text alone, over the
+         * selection; once the app reported that, the typed word and the text are deleted
+         * and the text inserted again, before a plain cursor */
+        if (o->ops->im_send) o->ops->im_send(o->d, 0, text);
+        imf_edit(&o->f, 0, text, now);
+        snprintf(o->pick_text, sizeof o->pick_text, "%s", text);
+        o->pick_del = del + (uint32_t)strlen(text);
+        o->pick_until = now + OSK_PICK_WAIT_MS;
+        o->sync_at = now + OSK_SYNC_MS;     /* some apps report only when asked */
+        after_edit(o, now);
+        return;
+    }
     if (o->ops->im_send) o->ops->im_send(o->d, del, text);
     imf_edit(&o->f, del, text, now);
     after_edit(o, now);
+}
+
+/* the second step of a pick over a selection: the app took the first (its report
+ * matches the view, no selection); the view still ends with the typed word and the
+ * picked text; otherwise (or after OSK_PICK_WAIT_MS) it is dropped */
+static void pick_second(struct osk *o, int64_t now)
+{
+    size_t len, t = strlen(o->pick_text);
+    const char *b = imf_before(&o->f, &len);
+    bool ok = o->pick_until && now < o->pick_until && imf_settled(&o->f) && len >= o->pick_del &&
+              t <= o->pick_del && !memcmp(b + len - t, o->pick_text, t);
+    o->pick_until = 0;
+    if (ok) {
+        if (o->ops->im_send) o->ops->im_send(o->d, o->pick_del, o->pick_text);
+        imf_edit(&o->f, o->pick_del, o->pick_text, now);
+        after_edit(o, now);
+    }
+    memset(o->pick_text, 0, sizeof o->pick_text);
 }
 
 static void remove_word(struct osk *o, int64_t now)
@@ -443,12 +517,26 @@ int64_t osk_next_deadline(const struct osk *o)
     if (o->held >= 0) d = earliest(d, o->hold_at);
     if (o->note_until) d = earliest(d, o->note_until);
     if (o->bs_down) d = earliest(d, o->bs_next);
+    if (o->sync_at) d = earliest(d, o->sync_at);
+    if (o->pick_until) d = earliest(d, o->pick_until);
     return d;
 }
 
 void osk_tick(struct osk *o, int64_t now)
 {
     pc_tick(&o->pc, now);
+    if (o->sync_at && now >= o->sync_at) {
+        /* the app reported late: an empty commit makes it report its newest text (and
+         * resolve a following delete against that); again after each late answer, spaced,
+         * until the own edits arrive or IM_INFLIGHT_MS passed */
+        o->sync_at = 0;
+        if (imf_late(&o->f, now) || (o->pick_until && !imf_settled(&o->f))) {
+            imf_asked(&o->f);
+            if (o->ops->im_send) o->ops->im_send(o->d, 0, "");
+            if (o->pick_until) o->sync_at = now + OSK_SYNC_MS;
+        }
+    }
+    if (o->pick_until && now >= o->pick_until) pick_second(o, now);
     if (o->held >= 0 && now >= o->hold_at) {
         int i = o->held;
         o->held = -1;
