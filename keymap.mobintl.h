@@ -1356,7 +1356,7 @@ xkb_symbols \"(unnamed)\" {\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
         key <COMP>               {	[            Menu ] };\
-        key <I248>               {	[       U%08X, U%08X ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -2820,7 +2820,7 @@ xkb_symbols \"(unnamed)\" {\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
         key <COMP>               {	[            Menu ] };\
-        key <I248>               {	[       U%08X, U%08X ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -4282,7 +4282,7 @@ xkb_symbols \"(unnamed)\" {\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
         key <COMP>               {	[            Menu ] };\
-        key <I248>               {	[       U%08X, U%08X ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -5747,7 +5747,7 @@ xkb_symbols \"(unnamed)\" {\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
         key <COMP>               {	[            Menu ] };\
-        key <I248>               {	[       U%08X, U%08X ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -7212,7 +7212,7 @@ xkb_symbols \"(unnamed)\" {\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
         key <COMP>               {	[            Menu ] };\
-        key <I248>               {	[       U%08X, U%08X ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -8677,7 +8677,7 @@ xkb_symbols \"(unnamed)\" {\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
         key <COMP>               {	[            Menu ] };\
-        key <I248>               {	[       U%08X, U%08X ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -10138,7 +10138,7 @@ xkb_symbols \"(unnamed)\" {\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
         key <COMP>               {	[            Menu ] };\
-        key <I248>               {	[       U%08X, U%08X ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\

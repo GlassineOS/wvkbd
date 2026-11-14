@@ -15,10 +15,11 @@
 #define MAX_LAYERS 25
 
 /* glassine: the key a Copy key's (and a hold's) character is put on in the temporary
- * keymap: evdev KEY_UNKNOWN (xkb <I248>), which no application gives a meaning.
- * Upstream uses KEY_COMPOSE (127, <COMP>), the Menu key: Chromium opens its
- * context menu on that key code, whatever character it carries */
-#define KBD_UNICODE_KEY 240
+ * keymap: evdev KEY_RO (xkb <AB11>, DOM code IntlRo), a character key no layout here
+ * uses. Upstream uses KEY_COMPOSE (127, <COMP>), the Menu key: Chromium opens its
+ * context menu on that key code, whatever character it carries. A code without a
+ * meaning (KEY_UNKNOWN) does not work either: Chromium drops the event */
+#define KBD_UNICODE_KEY 89
 
 /* glassine: long press (see struct kbd). The timer is main.c's timerfd */
 int kbd_hold_timer_fd = -1;
