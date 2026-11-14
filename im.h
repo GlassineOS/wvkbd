@@ -4,10 +4,18 @@
  *
  * The view: what the app reports as surrounding text (the part before the cursor), or,
  * when it reports none, what was typed into the field since it was focused. The
- * keyboard's own edits change the view at once (the app's report comes later); while
- * one of them is on its way (at most IM_INFLIGHT_MS), an older report doesn't replace
- * it. A change the app reports as made by other means drops the keyboard's view. In a
- * private field (imf_private) there is no view at all: nothing typed there is kept. */
+ * keyboard's own edits change the view at once (the app's report comes later). Apps
+ * report late in different ways: one report per edit, a report of the text half-way
+ * through an edit (the delete done, the insert not yet), the text from before the edit
+ * first and the new text after it, or always one edit behind. So while own edits are on
+ * their way (until IM_INFLIGHT_MS after the last one), a report is judged by its text:
+ * the text the field had before one of them (or half-way through it) is a late report
+ * and is ignored; the text of the view confirms it; any other text is the app's own
+ * change and replaces the view. After a late report the keyboard asks for a fresh one
+ * (imf_late): some apps send their newest text only in answer to the input method's
+ * next commit, and resolve a delete against the text they last sent. A change the app reports as made by other
+ * means drops the keyboard's view. In a private field (imf_private) there is no view at
+ * all: nothing typed there is kept. */
 #ifndef IM_H
 #define IM_H
 
@@ -32,6 +40,7 @@ enum { IM_CAUSE_INPUT_METHOD = 0, IM_CAUSE_OTHER = 1 };
 
 #define IM_VIEW_MAX 4096        /* bytes of text before the cursor kept */
 #define IM_INFLIGHT_MS 500      /* an own edit trusted over the app's older report */
+#define IM_OLD_MAX 8            /* texts of the field superseded by own edits on their way */
 
 /* what a done changed (imf_done) */
 enum { IM_FOCUS_ON = 1, IM_FOCUS_OFF = 2, IM_TYPE = 4, IM_VIEW = 8 };
@@ -43,8 +52,12 @@ struct im_field {
     bool selection;             /* text is selected (anchor != cursor) */
     char before[IM_VIEW_MAX + 1];
     size_t len;
-    int inflight;               /* own edits not reported back yet */
+    /* the texts before the cursor the field had during own edits on their way (a hash
+     * and length each): a report of one of them is late */
+    struct { uint64_t h; size_t len; } old[IM_OLD_MAX];
+    int n_old;
     int64_t last_edit_ms;
+    bool late;                  /* the last report was late (imf_late) */
     uint32_t serial;            /* done events received (the commit serial) */
 
     struct {                    /* pending, applied on done */
@@ -79,6 +92,14 @@ void imf_edit(struct im_field *f, size_t del, const char *text, int64_t now_ms);
 void imf_lost(struct im_field *f);
 /* Backspace sent as a key event: a view of its own typing loses its last character */
 void imf_key_backspace(struct im_field *f);
+
+/* the last report was late and own edits are still on their way: the caller sends an
+ * empty commit (spaced, see osk.c), which makes the app report its newest text; then
+ * imf_asked */
+bool imf_late(const struct im_field *f, int64_t now_ms);
+void imf_asked(struct im_field *f);
+/* the app's last report matched the view: no own edit on its way, no selection */
+bool imf_settled(const struct im_field *f);
 
 /* the view */
 const char *imf_before(const struct im_field *f, size_t *len);
