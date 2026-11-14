@@ -54,6 +54,16 @@ void drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
                    uint32_t w, uint32_t h, uint32_t b, const char *label,
                    PangoFontDescription *font_description);
 
+/* glassine: the strip's text (ellipsized: one line, cut with … when too long), its
+ * width, and its icons (drawn as paths: no icon font needed) */
+void drw_draw_text_ex(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                      uint32_t w, uint32_t h, uint32_t b, const char *label,
+                      PangoFontDescription *font_description, bool ellipsize);
+int drw_text_width(struct drwsurf *ds, const char *label, PangoFontDescription *font_description);
+enum drw_icon { DRW_ICON_PEN, DRW_ICON_HIDE, DRW_ICON_LOCK };
+void drw_draw_icon(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                   uint32_t w, uint32_t h, enum drw_icon icon);
+
 uint32_t setup_buffer(struct drwsurf *ds, struct drwbuf *db);
 
 #endif

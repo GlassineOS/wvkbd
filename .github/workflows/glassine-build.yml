@@ -10,8 +10,12 @@ jobs:
       - name: build on Alpine
         run: |
           docker run --rm -v "$PWD":/src -w /src alpine:3.24 sh -euc '
-            apk add -q build-base wayland-dev wayland-protocols pango-dev cairo-dev libxkbcommon-dev scdoc
+            apk add -q build-base wayland-dev wayland-protocols pango-dev cairo-dev libxkbcommon-dev scdoc python3
             make
             ./wvkbd-mobintl --help 2>&1 | grep -q -- --stroke-width
             ./wvkbd-mobintl --list-layers | grep -qx german
-            make clean'
+            ./wvkbd-mobintl --help 2>&1 | grep -q -- --predictor
+            make check
+            make clean
+            make LAYOUT=deskintl wvkbd-deskintl
+            make LAYOUT=deskintl clean'

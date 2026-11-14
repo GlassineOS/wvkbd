@@ -54,6 +54,15 @@ wvkbd-${LAYOUT}: $(BUILDDIR)/config.h $(OBJECTS) layout.${LAYOUT}.h
 clean:
 	rm -rf "$(BUILDDIR)" wvkbd-$(LAYOUT)
 
+# glassine: host tests of the input method (no Wayland); check-e2e: headless sway (Docker)
+check:
+	$(MAKE) -C test/unit check
+
+check-e2e:
+	sh test/e2e/test.sh
+
+.PHONY: check check-e2e
+
 format:
 	clang-format -i $(WVKBD_SOURCES) $(WVKBD_HEADERS)
 

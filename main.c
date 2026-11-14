@@ -6,6 +6,11 @@
 #include "proto/input-method-unstable-v2-protocol.h"
 #include <errno.h>
 #include <linux/input-event-codes.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +54,18 @@ static struct wp_fractional_scale_manager_v1 *wfs_mgr;
 static struct wp_viewport *draw_surf_viewport, *popup_draw_surf_viewport;
 static struct wp_viewporter *viewporter;
 static struct zwp_input_method_manager_v2 *im_mgr;
+/* glassine: the keyboard as the input method (osk.h) */
+static struct zwp_input_method_v2 *input_method;
+static bool im_mode;                    /* --im: commit text, the strip, the predictor */
+static struct osk osk;
+static int64_t im_retry_at = -1;        /* another input method had the seat: try again */
+static int im_retry_ms = 1000;
+static bool strip_on;                   /* --strip */
+static int strip_height = -1;           /* --strip-height (-1: a key row's) */
+static char *predictor_cmd;             /* --predictor */
+static char *notify_path;               /* --notify: focus reports to the session */
+static char *hide_cmd, *pen_cmd;        /* --hide-cmd, --pen-cmd */
+static bool strip_touch;                /* the touch or press began in the strip */
 static bool popup_xdg_surface_configured;
 static bool layer_surface_configured;
 
@@ -269,6 +286,8 @@ wl_touch_down(void *data, struct wl_touch *wl_touch, uint32_t serial,
 
     kbd_unpress_key(&keyboard, time);
 
+    strip_touch = keyboard.osk && osk_strip_down(keyboard.osk, touch_x, touch_y, monotime());
+    if (strip_touch) return;
     next_key = kbd_get_key(&keyboard, touch_x, touch_y);
     if (next_key) {
         kbd_press_key(&keyboard, next_key, time);
@@ -287,6 +306,11 @@ wl_touch_up(void *data, struct wl_touch *wl_touch, uint32_t serial,
         return;
     }
 
+    if (strip_touch) {
+        strip_touch = false;
+        osk_strip_up(keyboard.osk, monotime());
+        return;
+    }
     kbd_release_key(&keyboard, time);
 }
 
@@ -303,6 +327,10 @@ wl_touch_motion(void *data, struct wl_touch *wl_touch, uint32_t time,
     touch_x = wl_fixed_to_int(x);
     touch_y = wl_fixed_to_int(y);
 
+    if (strip_touch) {
+        osk_strip_motion(keyboard.osk, touch_x, touch_y);
+        return;
+    }
     kbd_motion_key(&keyboard, time, touch_x, touch_y);
 }
 
@@ -333,6 +361,9 @@ wl_pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                  struct wl_surface *surface, wl_fixed_t surface_x,
                  wl_fixed_t surface_y)
 {
+    /* glassine: a press right after entering (a pen or pointer that jumps there) */
+    cur_x = wl_fixed_to_int(surface_x);
+    cur_y = wl_fixed_to_int(surface_y);
 }
 
 void
@@ -353,7 +384,9 @@ wl_pointer_motion(void *data, struct wl_pointer *wl_pointer, uint32_t time,
     cur_x = wl_fixed_to_int(surface_x);
     cur_y = wl_fixed_to_int(surface_y);
 
-    if (cur_press) {
+    if (cur_press && strip_touch) {
+        osk_strip_motion(keyboard.osk, cur_x, cur_y);
+    } else if (cur_press) {
         kbd_motion_key(&keyboard, time, cur_x, cur_y);
     }
 }
@@ -369,13 +402,20 @@ wl_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
     struct key *next_key;
     cur_press = state == WL_POINTER_BUTTON_STATE_PRESSED;
 
+    if (!cur_press && strip_touch) {
+        strip_touch = false;
+        osk_strip_up(keyboard.osk, monotime());
+        return;
+    }
     if (cur_press) {
         kbd_unpress_key(&keyboard, time);
     } else {
         kbd_release_key(&keyboard, time);
     }
 
-    if (cur_press && cur_x >= 0 && cur_y >= 0) {
+    strip_touch = cur_press && cur_x >= 0 && cur_y >= 0 && keyboard.osk &&
+                  osk_strip_down(keyboard.osk, cur_x, cur_y, monotime());
+    if (cur_press && cur_x >= 0 && cur_y >= 0 && !strip_touch) {
         next_key = kbd_get_key(&keyboard, cur_x, cur_y);
         if (next_key) {
             kbd_press_key(&keyboard, next_key, time);
@@ -470,7 +510,7 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
                       zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
         vkbd_mgr = wl_registry_bind(
             registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
-    } else if (im_auto && strcmp(interface, zwp_input_method_manager_v2_interface.name) == 0) {
+    } else if ((im_auto || im_mode) && strcmp(interface, zwp_input_method_manager_v2_interface.name) == 0) {
         im_mgr = wl_registry_bind(registry, name, &zwp_input_method_manager_v2_interface, 1);
     }
 }
@@ -522,43 +562,176 @@ static const struct wp_fractional_scale_v1_listener
         .preferred_scale = wp_fractional_scale_preferred_scale,
 };
 
+/* glassine: the input method's events go to osk.c (state applies on done); --auto
+ * shows and hides with the focus (osk_ops.focus) */
 void
 im_activate(void *data, struct zwp_input_method_v2 *zwp_input_method_v2)
 {
-    show();
+    osk_im_activate(&osk);
 }
 
 void
 im_deactivate(void *data, struct zwp_input_method_v2 *zwp_input_method_v2)
 {
-    hide();
+    osk_im_deactivate(&osk);
 }
 
 void
 im_surrounding_text(void *data, struct zwp_input_method_v2 *zwp_input_method_v2,
                     const char *text, uint32_t cursor, uint32_t anchor)
 {
+    osk_im_surrounding(&osk, text, cursor, anchor);
 }
 
 void im_text_change_cause(void *data, struct zwp_input_method_v2 *zwp_input_method_v2,
                           uint32_t cause)
 {
+    osk_im_cause(&osk, cause);
 }
 
 void im_content_type(void *data, struct zwp_input_method_v2 *zwp_input_method_v2,
                      uint32_t hint, uint32_t purpose)
 {
+    osk_im_content_type(&osk, hint, purpose);
 }
 
 void
 im_done(void *data, struct zwp_input_method_v2 *zwp_input_method_v2)
 {
+    osk_im_done(&osk, monotime());
 }
 
+static void notify(const char *msg);
+
+/* another input method has the seat: plain keys, and a try again later (the session
+ * gives its own up when told, see notify "osk im") */
 void
 im_unavailable(void *data, struct zwp_input_method_v2 *zwp_input_method_v2)
 {
+    fprintf(stderr, "input method: the seat has another one, plain keys (again in %d ms)\n", im_retry_ms);
+    zwp_input_method_v2_destroy(zwp_input_method_v2);
+    if (zwp_input_method_v2 == input_method) input_method = NULL;
+    osk_im_deactivate(&osk);
+    osk_im_done(&osk, monotime());
+    im_retry_at = monotime() + im_retry_ms;
+    im_retry_ms = im_retry_ms * 2 > 30000 ? 30000 : im_retry_ms * 2;
+    notify("osk im");
 }
+
+static void
+im_bind(void)
+{
+    if (!im_mgr || input_method) return;
+    im_retry_at = -1;
+    input_method = zwp_input_method_manager_v2_get_input_method(im_mgr, seat);
+    zwp_input_method_v2_add_listener(input_method, &input_method_listener, NULL);
+    osk_im_new(&osk);           /* a new object: its commits count its own done events */
+}
+
+/* ---- glassine: osk_ops (osk.h) ---- */
+static void
+op_im_send(void *d, uint32_t del, const char *text)
+{
+    if (!input_method) return;
+    if (del) zwp_input_method_v2_delete_surrounding_text(input_method, del, 0);
+    if (text && *text) zwp_input_method_v2_commit_string(input_method, text);
+    zwp_input_method_v2_commit(input_method, osk_serial(&osk));
+}
+
+static void
+op_strip_changed(void *d)
+{
+    if (layer_surface_configured) kbd_draw_strip(&keyboard);
+}
+
+static void
+op_keys(void *d, enum osk_keys k)
+{
+    kbd_set_keys(&keyboard, k);
+}
+
+static void
+op_shift(void *d, bool on)
+{
+    if (layer_surface_configured) kbd_draw_layout(&keyboard);
+}
+
+static pid_t helpers[8];        /* --hide-cmd and --pen-cmd runs, reaped in the loop */
+
+static void
+run_cmd(const char *cmd)
+{
+    if (!cmd || !*cmd) return;
+    char *av[] = { "/bin/sh", "-c", (char *)cmd, NULL };
+    posix_spawnattr_t at;
+    sigset_t none;
+    sigemptyset(&none);
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setsigmask(&at, &none);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK);
+    pid_t pid;
+    extern char **environ;
+    if (posix_spawn(&pid, av[0], NULL, &at, av, environ) == 0) {
+        for (unsigned i = 0; i < countof(helpers); i++)
+            if (!helpers[i]) { helpers[i] = pid; pid = 0; break; }
+        if (pid) waitpid(pid, NULL, WNOHANG);
+    }
+    posix_spawnattr_destroy(&at);
+}
+
+static void
+reap_helpers(void)
+{
+    for (unsigned i = 0; i < countof(helpers); i++)
+        if (helpers[i] && waitpid(helpers[i], NULL, WNOHANG) != 0) helpers[i] = 0;
+}
+
+static void
+op_hide(void *d)
+{
+    if (hide_cmd) run_cmd(hide_cmd);    /* the session's own hide (it keeps its state) */
+    else hide();
+}
+
+static void
+op_handwriting(void *d)
+{
+    run_cmd(pen_cmd);
+}
+
+/* a one-line datagram to the session (--notify), never waited for */
+static void
+notify(const char *msg)
+{
+    if (!notify_path) return;
+    struct sockaddr_un sa = { .sun_family = AF_UNIX };
+    snprintf(sa.sun_path, sizeof sa.sun_path, "%s", notify_path);
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return;
+    sendto(fd, msg, strlen(msg), MSG_NOSIGNAL, (struct sockaddr *)&sa, sizeof sa);
+    close(fd);
+}
+
+static void
+op_focus(void *d, int state, uint32_t purpose)
+{
+    char m[48];
+    if (state == 2) snprintf(m, sizeof m, "osk changed");
+    else snprintf(m, sizeof m, "osk focus %d %u", state, purpose);
+    notify(m);
+    if (im_auto && state == 1) show();
+    else if (im_auto && state == 0) hide();
+}
+
+static const struct osk_ops osk_ops = {
+    .im_send = op_im_send,
+    .strip_changed = op_strip_changed,
+    .keys = op_keys,
+    .shift = op_shift,
+    .hide = op_hide,
+    .handwriting = op_handwriting,
+    .focus = op_focus,
+};
 
 void
 redimension_keyboard()
@@ -581,12 +754,20 @@ redimension_keyboard()
     } else {
         keyboard.w = available_width;
     }
+    /* glassine: the strip, a key row of the first layer high, above the keys */
+    keyboard.strip_h = 0;
+    if (strip_on) {
+        uint8_t rows = kbd_get_rows(&keyboard.layouts[layer]);
+        keyboard.strip_h = strip_height >= 0 ? (uint32_t)strip_height : height / (rows ? rows : 1);
+    }
+    height += keyboard.strip_h;
     keyboard.h = height;
     keyboard.layout = &keyboard.layouts[layer];
     keyboard.layer_index = 0;
     keyboard.prevlayout = keyboard.layout;
     keyboard.last_abc_layout = keyboard.layout;
     keyboard.last_abc_index = 0;
+    kbd_reset_layer(&keyboard);     /* glassine: the keys the focused field asks for */
 }
 
 void
@@ -725,6 +906,14 @@ usage(char *argv0)
     fprintf(stderr, "  --corner-radius [pixels] - Corner radius of keyboard window\n");
     fprintf(stderr, "  --bg-alpha [0-255]       - Independent opacity for keyboard baseplate\n");
     fprintf(stderr, "  --double-space-period    - Double tap space to insert period and space\n");
+    fprintf(stderr, "  --im                     - glassine: be the input method: text is committed to the focused field\n");
+    fprintf(stderr, "  --strip                  - glassine: the suggestion strip above the keys (with --im)\n");
+    fprintf(stderr, "  --strip-height [px]      - glassine: its height (default: a key row's)\n");
+    fprintf(stderr, "  --predictor [cmd]        - glassine: the word predictor (docs/predictor.md of GlassineOS/shell)\n");
+    fprintf(stderr, "  --lang [list]            - glassine: the languages it gets (default: the layout's)\n");
+    fprintf(stderr, "  --notify [socket]        - glassine: focus reports to the session (datagrams)\n");
+    fprintf(stderr, "  --hide-cmd [cmd]         - glassine: the strip's hide key runs this (default: hide)\n");
+    fprintf(stderr, "  --pen-cmd [cmd]          - glassine: the pen key (handwriting) runs this; no pen key without it\n");
     fprintf(stderr, "  --non-exclusive    - Allow the keyboard to overlap "
                     "windows. Do not request an exclusive zone from the "
                     "compositor\n");
@@ -793,6 +982,8 @@ hide()
     draw_surf.attached = false;
 
     hidden = true;
+    if (keyboard.debug) fprintf(stderr, "hidden\n");
+    if (keyboard.osk) osk_visible(keyboard.osk, false, monotime());
 }
 
 void
@@ -843,6 +1034,10 @@ show()
     zwlr_layer_surface_v1_add_listener(layer_surface, &layer_surface_listener,
                                        NULL);
     wl_surface_commit(draw_surf.surf);
+    if (keyboard.osk) {
+        osk_languages(keyboard.osk, kbd_lang(&keyboard), monotime());   /* before the first request */
+        osk_visible(keyboard.osk, true, monotime());
+    }
 }
 
 void
@@ -1141,6 +1336,24 @@ main(int argc, char **argv)
         } else if ((!strcmp(argv[i], "-auto")) ||
                    (!strcmp(argv[i], "--auto"))) {
             im_auto = true;
+        } else if (!strcmp(argv[i], "--im")) {
+            im_mode = true;
+        } else if (!strcmp(argv[i], "--strip")) {
+            strip_on = true;
+        } else if (!strcmp(argv[i], "--strip-height") || !strcmp(argv[i], "--predictor") ||
+                   !strcmp(argv[i], "--lang") || !strcmp(argv[i], "--notify") ||
+                   !strcmp(argv[i], "--hide-cmd") || !strcmp(argv[i], "--pen-cmd")) {
+            if (i >= argc - 1) {
+                usage(argv[0]);
+                exit(1);
+            }
+            const char *o = argv[i++];
+            if (!strcmp(o, "--strip-height")) strip_height = atoi(argv[i]);
+            else if (!strcmp(o, "--predictor")) predictor_cmd = estrdup(argv[i]);
+            else if (!strcmp(o, "--lang")) keyboard.lang_override = estrdup(argv[i]);
+            else if (!strcmp(o, "--notify")) notify_path = estrdup(argv[i]);
+            else if (!strcmp(o, "--hide-cmd")) hide_cmd = estrdup(argv[i]);
+            else pen_cmd = estrdup(argv[i]);
         } else if ((!strcmp(argv[i], "-wayland-layer")) ||
                    (!strcmp(argv[i], "--wayland-layer"))) {
             if (i >= argc - 1) {
@@ -1288,11 +1501,17 @@ main(int argc, char **argv)
     kbd_init(&keyboard, (struct layout *)&layouts, layer_names_list,
              landscape_layer_names_list);
 
-    if (im_mgr != NULL) {
-        struct zwp_input_method_v2 *input_method =
-            zwp_input_method_manager_v2_get_input_method(im_mgr, seat);
-        zwp_input_method_v2_add_listener(input_method, &input_method_listener, NULL);
+    /* glassine: the input method (--im, or upstream's --auto: show and hide only) */
+    static char *pargv[16];
+    if (predictor_cmd && strip_on) {    /* words split at spaces, no shell */
+        int n = 0;
+        for (char *t = strtok(predictor_cmd, " "); t && n < 15; t = strtok(NULL, " ")) pargv[n++] = t;
     }
+    osk_init(&osk, &osk_ops, NULL, pargv[0] ? pargv : NULL, strip_on && im_mode, pen_cmd != NULL);
+    if (im_mode) keyboard.osk = &osk;
+    if (!im_mode) osk.strip_on = false;
+    im_bind();
+    if (im_mgr && im_mode) notify("osk im");
 
     for (i = 0; i < countof(schemes); i++) {
         schemes[i].font_description =
@@ -1306,15 +1525,31 @@ main(int argc, char **argv)
             else
                 pango_font_description_set_size(schemes[i].hint_font_description, (int)(fs * 0.55));
         }
+        /* glassine: the strip's words (the likeliest bold) and its notes */
+        schemes[i].word_font = pango_font_description_copy(schemes[i].font_description);
+        schemes[i].note_font = pango_font_description_copy(schemes[i].font_description);
+        if (fs > 0) {
+            if (pango_font_description_get_size_is_absolute(schemes[i].font_description)) {
+                pango_font_description_set_absolute_size(schemes[i].word_font, fs * 0.85);
+                pango_font_description_set_absolute_size(schemes[i].note_font, fs * 0.75);
+            } else {
+                pango_font_description_set_size(schemes[i].word_font, (int)(fs * 0.85));
+                pango_font_description_set_size(schemes[i].note_font, (int)(fs * 0.75));
+            }
+        }
+        pango_font_description_set_weight(schemes[i].word_font, PANGO_WEIGHT_NORMAL);
+        schemes[i].best_font = pango_font_description_copy(schemes[i].word_font);
+        pango_font_description_set_weight(schemes[i].best_font, PANGO_WEIGHT_SEMIBOLD);
     }
 
     if (!hidden)
         show();
 
-    struct pollfd fds[3];
+    struct pollfd fds[5];
     int WAYLAND_FD = 0;
     int SIGNAL_FD = 1;
     int HOLD_FD = 2;    /* glassine: long press */
+    int OSK_FD = 3;     /* glassine: the predictor (up to 2) */
     fds[WAYLAND_FD].events = POLLIN;
     fds[SIGNAL_FD].events = POLLIN;
     fds[HOLD_FD].events = POLLIN;
@@ -1347,7 +1582,18 @@ main(int argc, char **argv)
 
     while (run_display) {
         wl_display_flush(display);
-        poll(fds, 3, -1);
+        /* glassine: the predictor's fds, and the earliest timer of the input method */
+        int nosk = osk_poll_fds(&osk, fds + OSK_FD);
+        int64_t now = monotime(), dl = osk_next_deadline(&osk);
+        if (im_retry_at >= 0 && (dl < 0 || im_retry_at < dl)) dl = im_retry_at;
+        int wait = dl < 0 ? -1 : dl <= now ? 0 : (int)(dl - now);
+        for (int f = 0; f < OSK_FD; f++) fds[f].revents = 0;
+        poll(fds, OSK_FD + nosk, wait);
+        now = monotime();
+        if (nosk) osk_handle(&osk, fds + OSK_FD, nosk, now);
+        osk_tick(&osk, now);
+        if (im_retry_at >= 0 && now >= im_retry_at) im_bind();
+        reap_helpers();
 
         if (fds[WAYLAND_FD].revents & POLLIN)
             wl_display_dispatch(display);
@@ -1380,6 +1626,7 @@ main(int argc, char **argv)
         }
     }
 
+    osk_finish(&osk);
     if (fc_font_pattern) {
         free((void *)fc_font_pattern);
         for (i = 0; i < countof(schemes); i++)

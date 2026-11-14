@@ -2,8 +2,7 @@ GlassineOS wvkbd
 ================
 
 This branch is the on-screen keyboard of GlassineOS (https://github.com/GlassineOS):
-wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus three changes, one commit
-each:
+wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus these changes:
 
   - themable keys: --stroke, --stroke-sp, --stroke-width and --gap (the shell
     passes its theme's look). The pressed-key label (--text-press, --text-press-sp)
@@ -14,6 +13,27 @@ each:
   - long press (--hold MS, default 400, 0: off): a held key types the
     alternate printed in its corner (":" on ".", ";" on ",", symbols on the
     letters). Only the German layer has alternates.
+  - the keyboard as the input method (GlassineOS/shell spec 006), all behind
+    --im: text is committed to the focused text field (zwp_input_method_v2),
+    Backspace deletes through it where the field reports its text, other keys
+    stay key events. The field's purpose picks the keys: number, phone and PIN
+    pads, an address row (@) for email, a URL row (/ .com). Private fields
+    (password, PIN, sensitive or hidden text) send nothing to the predictor and
+    print nothing on stdout.
+      --strip          the suggestion strip above the keys: three words, the
+                       likeliest in the middle; a pen key (--pen-cmd) and a
+                       hide key (--hide-cmd); holding a word asks to remove it
+      --predictor CMD  the word predictor, a child process on a socket pair
+                       (docs/predictor.md of GlassineOS/shell); missing, slow
+                       or crashed: an empty strip, started again with backoff
+      --lang LIST      the languages sent (default: the layout's)
+      --notify SOCKET  focus reports to the session ("osk focus 1 PURPOSE",
+                       "osk focus 0", "osk changed", "osk im")
+    $XDG_CONFIG_HOME/glassine/predict.conf: "suggestions = off" leaves the strip
+    empty and sends nothing, "handwriting = off" hides the pen key; read at each
+    field focus.
+    Files: im.c (the field), predict.c (the predictor client), strip.c (the
+    strip), osk.c (the three together; no Wayland, host-tested), textrules.h.
 
 Without the new options, and on upstream's layers, the keyboard behaves as
 upstream's.
@@ -23,6 +43,9 @@ Branches:
   glassine/0.16   the release Alpine 3.22 packaged (kept)
 
 Build: as upstream (make; needs wayland, pango, cairo, xkbcommon, scdoc).
+Tests: make check (host unit tests; python3 for the stand-in predictor;
+GLASSINE_PREDICT=path adds the real one), make check-e2e (headless sway in a
+Docker container: typing, picks, Backspace, private fields, pads, settings).
 
 The license is upstream's (GPL-3.0, LICENSE). Commits made with AI assistance
 carry an Assisted-by: trailer. They are not submitted upstream; see the
