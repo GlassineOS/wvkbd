@@ -70,7 +70,9 @@ recognizer; GLASSINE_PREDICT=path adds the real predictor), make check-e2e
 (headless sway in a Docker container: typing, picks, Backspace, private fields,
 pads, settings, the paper with strokes from a virtual pointer;
 HW_SRC=handwriting-checkout HW_MODELS=dir-with-en/recognizer.ghm adds a run with
-the real recognizer).
+the real recognizer), make check-toolkits GLASSINE_SHELL=path (picks in GTK 3
+and 4, Firefox and Chromium fields and Chromium's address bar, with the real
+predictor built from a GlassineOS/shell checkout; Docker, slow).
 
 The license is upstream's (GPL-3.0, LICENSE). Commits made with AI assistance
 carry an Assisted-by: trailer. They are not submitted upstream; see the
