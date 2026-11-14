@@ -10,6 +10,11 @@
 #define KEY_KPENTER_ 96
 
 static void refresh(struct osk *o, int64_t now);
+static void hw_got_line(void *d, char **f, int n, int64_t now);
+static void hw_stopped(void *d, bool crashed);
+static bool fixing(const struct osk *o);
+static void fix_set(struct osk *o, const char *text);
+static void fix_leave(struct osk *o);
 static void pick_second(struct osk *o, int64_t now);
 static void release(struct osk *o, int64_t now, bool force);
 static void pick(struct osk *o, const char *word, const char *lang, int64_t now);
@@ -33,6 +38,16 @@ void osk_init(struct osk *o, const struct osk_ops *ops, void *d, char **predicto
     o->pen_on = pen;
     o->suggestions = o->handwriting = true;
     o->held = -1;
+    hw_init(&o->hw, NULL, hw_got_line, hw_stopped, o);
+    paper_init(&o->pp);
+    o->pause_ms = PAPER_PAUSE_MS;
+    o->caret_at = -1;
+}
+
+void osk_handwriting(struct osk *o, char **recognizer)
+{
+    hw_init(&o->hw, recognizer, hw_got_line, hw_stopped, o);
+    o->hw_on = recognizer && recognizer[0];
 }
 
 /* off, false, 0: off; anything else (or no line at all): on */
@@ -45,6 +60,7 @@ void osk_read_settings(struct osk *o, const char *path)
 {
     char def[1024];
     o->suggestions = o->handwriting = true;
+    o->pause_ms = PAPER_PAUSE_MS;
     if (!path) {
         const char *x = getenv("XDG_CONFIG_HOME"), *h = getenv("HOME");
         if (x && *x == '/') snprintf(def, sizeof def, "%s/glassine/predict.conf", x);
@@ -68,6 +84,10 @@ void osk_read_settings(struct osk *o, const char *path)
         *e = 0;
         if (!strcmp(k, "suggestions")) o->suggestions = conf_on(v);   /* the last line wins */
         else if (!strcmp(k, "handwriting")) o->handwriting = conf_on(v);
+        else if (!strcmp(k, "handwriting_pause")) {       /* ms, 200..5000 */
+            int ms = atoi(v);
+            o->pause_ms = ms < 200 ? PAPER_PAUSE_MS : ms > 5000 ? 5000 : ms;
+        }
     }
     fclose(fp);
 }
@@ -75,6 +95,8 @@ void osk_read_settings(struct osk *o, const char *path)
 void osk_finish(struct osk *o)
 {
     pc_stop(&o->pc);
+    hw_stop(&o->hw);
+    paper_free(&o->pp);
     imf_free(&o->f);
 }
 
@@ -88,12 +110,18 @@ static void refresh(struct osk *o, int64_t now)
 {
     struct strip n = o->s;
     (void)now;
-    n.pen = o->pen_on && o->handwriting && o->f.active && !imf_private(&o->f);
+    n.pen = (o->pen_on || o->hw_on) && o->handwriting && o->f.active && !imf_private(&o->f);
     if (imf_private(&o->f)) n.mode = STRIP_PRIVATE;
     else if (o->s.ask[0]) n.mode = STRIP_ASK;
     else if (o->s.note[0]) n.mode = STRIP_NOTE;
     else n.mode = STRIP_WORDS;
-    if (n.mode == STRIP_WORDS && want_predictor(o) && o->visible) n.words = o->words;
+    if (n.mode == STRIP_WORDS && fixing(o)) {          /* correcting: the readings */
+        memset(&n.words, 0, sizeof n.words);
+        for (int i = 0; i < o->pp.ncand && i < PC_WORDS; i++) {
+            snprintf(n.words.word[i], PC_WORD_MAX, "%s", o->pp.cand[i]);
+            n.words.n++;
+        }
+    } else if (n.mode == STRIP_WORDS && want_predictor(o) && o->visible) n.words = o->words;
     else memset(&n.words, 0, sizeof n.words);
     if (strip_same(&o->s, &n)) { o->s = n; return; }
     o->s = n;
@@ -110,6 +138,7 @@ static uint64_t fnv(uint64_t h, const char *s, size_t n)
 static void ask_words(struct osk *o, int64_t now, bool force)
 {
     if (!o->visible) return;            /* FR-014: nothing while hidden */
+    if (fixing(o)) return;              /* the strip shows the readings */
     if (!want_predictor(o)) {
         o->words.n = 0;
         o->asked = 0;
@@ -218,6 +247,8 @@ void osk_im_content_type(struct osk *o, uint32_t h, uint32_t p) { imf_content_ty
 uint32_t osk_serial(const struct osk *o) { return o->f.serial; }
 void osk_im_new(struct osk *o) { o->f.serial = 0; }
 
+static void paper_field(struct osk *o, int r, int64_t now);
+
 void osk_im_done(struct osk *o, int64_t now)
 {
     int r = imf_done(&o->f, now);
@@ -249,6 +280,7 @@ void osk_im_done(struct osk *o, int64_t now)
         o->ops->focus(o->d, 2, o->f.purpose);
     }
     if ((r & IM_TYPE) && o->f.active && o->ops->keys) o->ops->keys(o->d, keys_for(&o->f));
+    if (r & (IM_FOCUS_ON | IM_FOCUS_OFF | IM_TYPE)) paper_field(o, r, now);
     if (r) after_edit(o, now);
     if (o->pick_until && imf_settled(&o->f)) pick_second(o, now);
     if (o->queued) release(o, now, false);
@@ -342,6 +374,12 @@ static void release(struct osk *o, int64_t now, bool force)
 bool osk_text(struct osk *o, const char *text, int64_t now)
 {
     if (!o->f.active || !text || !*text) return false;
+    if (fixing(o)) {                    /* correcting a reading: the keys edit it */
+        char t[PAPER_TEXT_MAX];
+        snprintf(t, sizeof t, "%s%s", o->pp.fix, text);
+        fix_set(o, t);
+        return true;
+    }
     if (o->queued) hold(o, OSK_OP_TEXT, text, NULL, now);
     else text_now(o, text, now);
     return true;
@@ -350,6 +388,13 @@ bool osk_text(struct osk *o, const char *text, int64_t now)
 bool osk_backspace(struct osk *o, int64_t now)
 {
     if (!o->f.active) return false;
+    if (fixing(o)) {
+        char t[PAPER_TEXT_MAX];
+        snprintf(t, sizeof t, "%s", o->pp.fix);
+        if (*t) t[tr_prev(t, strlen(t))] = 0;
+        fix_set(o, t);
+        return true;
+    }
     size_t n = imf_backspace_bytes(&o->f);
     if (!n && !o->queued) {             /* the key does it: the own view follows */
         imf_key_backspace(&o->f);
@@ -538,10 +583,13 @@ bool osk_strip_down(struct osk *o, int x, int y, int64_t now)
         o->hold_at = now + OSK_HOLD_MS;
         break;
     case SI_PEN:
-        if (o->ops->handwriting) o->ops->handwriting(o->d);
+        if (fixing(o)) fix_leave(o);                    /* back to the paper */
+        else if (o->hw_on) osk_paper_open(o, now);
+        else if (o->ops->handwriting) o->ops->handwriting(o->d);
         break;
     case SI_HIDE:
-        if (o->ops->hide) o->ops->hide(o->d);
+        if (fixing(o)) fix_leave(o);
+        else if (o->ops->hide) o->ops->hide(o->d);
         break;
     case SI_KEEP:
         o->s.ask[0] = 0;
@@ -568,6 +616,10 @@ void osk_strip_up(struct osk *o, int64_t now)
     int i = o->held;
     o->held = -1;
     if (i < 0 || o->s.mode != STRIP_WORDS || i >= o->s.words.n) return;
+    if (fixing(o)) {                    /* a reading picked while correcting: the edit's text */
+        fix_set(o, o->s.words.word[i]);
+        return;
+    }
     char w[PC_WORD_MAX], l[PC_LANG_MAX];
     snprintf(w, sizeof w, "%s", o->s.words.word[i]);
     snprintf(l, sizeof l, "%s", o->s.words.lang[i]);
@@ -577,12 +629,16 @@ void osk_strip_up(struct osk *o, int64_t now)
 
 int osk_poll_fds(struct osk *o, struct pollfd *fds)
 {
-    return pc_poll_fds(&o->pc, fds);
+    int n = pc_poll_fds(&o->pc, fds);
+    return n + hw_poll_fds(&o->hw, fds + n);
 }
 
 void osk_handle(struct osk *o, const struct pollfd *fds, int n, int64_t now)
 {
-    pc_handle(&o->pc, fds, n, now);
+    for (int i = 0; i < n; i++) {
+        if (fds[i].fd == o->pc.from) pc_handle(&o->pc, fds + i, 1, now);
+        else if (fds[i].fd == o->hw.fd) hw_handle(&o->hw, fds + i, 1, now);
+    }
 }
 
 static int64_t earliest(int64_t a, int64_t b)
@@ -598,15 +654,23 @@ int64_t osk_next_deadline(const struct osk *o)
     if (o->held >= 0) d = earliest(d, o->hold_at);
     if (o->note_until) d = earliest(d, o->note_until);
     if (o->bs_down) d = earliest(d, o->bs_next);
+    d = earliest(d, hw_next_deadline(&o->hw));
+    if (o->pause_at) d = earliest(d, o->pause_at);
+    if (o->paper_note_until) d = earliest(d, o->paper_note_until);
+    if (o->need_read && o->paper_up) d = earliest(d, o->hw.restart_ms);
     if (o->sync_at) d = earliest(d, o->sync_at);
     if (o->pick_until) d = earliest(d, o->pick_until);
     if (o->queued) d = earliest(d, o->queue_until);
     return d;
 }
 
+static void paper_tick(struct osk *o, int64_t now);
+
 void osk_tick(struct osk *o, int64_t now)
 {
     pc_tick(&o->pc, now);
+    hw_tick(&o->hw, now);
+    paper_tick(o, now);
     if (o->sync_at && now >= o->sync_at) {
         /* the app reported late: an empty commit makes it report its newest text (and
          * resolve a following delete against that); again after each late answer, spaced,
@@ -639,4 +703,600 @@ void osk_tick(struct osk *o, int64_t now)
         else backspace_now(o, now);
         o->bs_next = now + OSK_REPEAT_MS;
     }
+}
+
+/* ---- handwriting (FR-010..FR-013a) ------------------------------------------------- */
+
+static bool fixing(const struct osk *o)
+{
+    return o->paper_up && o->pp.fixing;
+}
+
+/* THE privacy rule for handwriting (FR-007): the recognizer hears of a field, and the
+ * paper opens on it, only when this says so */
+static bool want_recognizer(const struct osk *o)
+{
+    return o->hw_on && o->handwriting && o->f.active && !imf_private(&o->f);
+}
+
+bool osk_paper_offered(const struct osk *o)
+{
+    return want_recognizer(o);
+}
+
+bool osk_field_empty(const struct osk *o)
+{
+    return imf_empty(&o->f);
+}
+
+static void paper_draw(struct osk *o)
+{
+    if (o->paper_up && o->ops->paper_changed) o->ops->paper_changed(o->d);
+}
+
+static void set_view(struct osk *o, enum osk_view v)
+{
+    if (o->ops->view) o->ops->view(o->d, v);
+}
+
+static void preedit(struct osk *o, const char *t)
+{
+    if (o->f.active && o->ops->im_preedit) o->ops->im_preedit(o->d, 0, "", t);
+}
+
+static void readings_clear(struct osk *o)
+{
+    o->pp.ncand = 0;
+    memset(o->pp.cand, 0, sizeof o->pp.cand);
+    o->pp.pending = false;
+    o->pp.pending_n = 0;
+    memset(o->pending_text, 0, sizeof o->pending_text);
+    o->read_fresh = false;
+    o->want_read[0] = 0;
+    o->need_read = false;
+    o->pause_at = 0;
+    o->caret_at = -1;
+}
+
+static bool send_stroke(struct osk *o, struct paper_stroke *st, int64_t now)
+{
+    size_t n;
+    char *pts = paper_points_text(&o->pp, st, st->pressure, &n);
+    if (!pts) return false;
+    bool ok = hw_request_raw(&o->hw, now, st->id, "stroke", o->sid, pts, n);
+    memset(pts, 0, n);
+    free(pts);
+    if (!ok) st->id[0] = 0;
+    return ok;
+}
+
+/* the finished strokes not sent on the recognizer's current run */
+static void send_unsent(struct osk *o, int64_t now)
+{
+    for (int i = 0; i < o->pp.ns; i++) {
+        if (o->pp.drawing && i == o->pp.ns - 1) break;
+        if (!o->pp.s[i].id[0] && !send_stroke(o, &o->pp.s[i], now)) return;
+    }
+}
+
+/* a session on the recognizer's current run (begun again after it went away: the ink is
+ * sent again, so a lesson or a reading still has all of it) */
+static bool session(struct osk *o, int64_t now)
+{
+    if (!want_recognizer(o)) return false;
+    if (o->session && o->session_gen == o->hw.gen && hw_running(&o->hw)) return true;
+    o->session = false;
+    snprintf(o->sid, sizeof o->sid, "s%lu", ++o->nsession % 100000000UL);
+    char fld[160];
+    imf_field_name(&o->f, fld, sizeof fld);
+    size_t len;
+    const char *b = imf_before(&o->f, &len);
+    size_t from = len > 1024 ? len - 1024 : 0;  /* the last 1 KB of the text before */
+    while (from < len && ((unsigned char)b[from] & 0xC0) == 0x80) from++;
+    char before[1028];
+    memcpy(before, b + from, len - from);
+    before[len - from] = 0;
+    bool ok = hw_request(&o->hw, now, NULL, "begin", o->sid, "-", fld, "em", before, (char *)NULL);
+    memset(before, 0, sizeof before);
+    if (!ok) return false;
+    o->session = true;
+    o->session_gen = o->hw.gen;
+    for (int i = 0; i < o->pp.ns; i++) {
+        o->pp.s[i].num = -1;
+        o->pp.s[i].id[0] = 0;
+    }
+    send_unsent(o, now);
+    return true;
+}
+
+static void session_end(struct osk *o, int64_t now)
+{
+    if (o->session && o->session_gen == o->hw.gen && hw_running(&o->hw))
+        hw_request(&o->hw, now, NULL, "end", o->sid, (char *)NULL);
+    o->session = false;
+}
+
+/* read the ink (after each stroke; the newest read's answer is the one that counts) */
+static void ask_read(struct osk *o, int64_t now)
+{
+    o->read_fresh = false;
+    o->want_read[0] = 0;
+    if (!o->pp.ns) return;
+    if (!session(o, now) ||
+        !hw_request(&o->hw, now, o->want_read, "read", o->sid, "3", (char *)NULL)) {
+        o->want_read[0] = 0;
+        o->need_read = want_recognizer(o);      /* again when the recognizer is back */
+        return;
+    }
+    o->need_read = false;
+}
+
+/* strokes gone from the paper and the session, by the recognizer's numbers */
+static void remove_nums(struct osk *o, const int *nums, int n, int64_t now)
+{
+    char list[1024];
+    size_t k = 0;
+    list[0] = 0;
+    for (int j = 0; j < n; j++) {
+        int i = paper_find_num(&o->pp, nums[j]);
+        if (i < 0) continue;
+        if (i < o->pp.pending_n) o->pp.pending_n--;
+        paper_remove(&o->pp, i);
+        if (k + 16 < sizeof list) k += (size_t)snprintf(list + k, sizeof list - k, "%s%d", k ? "," : "", nums[j]);
+    }
+    if (k && o->session && o->session_gen == o->hw.gen)
+        hw_request(&o->hw, now, NULL, "remove", o->sid, list, (char *)NULL);
+}
+
+/* the first n strokes go (their text was committed or discarded) */
+static void drop_first(struct osk *o, int n, int64_t now)
+{
+    if (n >= o->pp.ns) {
+        if (o->session && o->session_gen == o->hw.gen)
+            hw_request(&o->hw, now, NULL, "clear", o->sid, (char *)NULL);
+        paper_clear(&o->pp);
+        return;
+    }
+    int nums[PAPER_STROKES_MAX], k = 0;
+    for (int i = 0; i < n; i++) if (o->pp.s[i].num >= 0) nums[k++] = o->pp.s[i].num;
+    for (int i = 0; i < n; i++) paper_remove(&o->pp, 0);
+    o->pp.pending_n = 0;
+    char list[4096];
+    size_t l = 0;
+    for (int i = 0; i < k && l + 16 < sizeof list; i++) l += (size_t)snprintf(list + l, sizeof list - l, "%s%d", i ? "," : "", nums[i]);
+    if (l && o->session && o->session_gen == o->hw.gen)
+        hw_request(&o->hw, now, NULL, "remove", o->sid, list, (char *)NULL);
+}
+
+/* text into the field (the pending text goes) */
+static void put_text(struct osk *o, const char *text, int64_t now)
+{
+    if (!o->f.active) return;
+    if (o->ops->im_preedit) o->ops->im_preedit(o->d, 0, text, "");
+    if (*text) {
+        imf_edit(&o->f, 0, text, now);
+        snprintf(o->last_hw, sizeof o->last_hw, "%s", text);
+    }
+}
+
+/* the reading goes into the field: text, a space after it (not in an address); source:
+ * the lesson (picked, corrected, confirmed; NULL: none: a reading committed as it was
+ * read teaches nothing). The ink it was read from clears; ink written after it stays. */
+static void commit_reading(struct osk *o, const char *text, const char *source, int64_t now)
+{
+    int n = o->pp.pending ? o->pp.pending_n : o->pp.ns;
+    /* a lesson needs exactly the ink of the reading in the session */
+    if (source && n == o->pp.ns && *text && session(o, now)) {
+        send_unsent(o, now);
+        if (!hw_request(&o->hw, now, o->confirm_id, "confirm", o->sid, source, text, (char *)NULL))
+            o->confirm_id[0] = 0;
+    }
+    char t[PAPER_TEXT_MAX + 2];
+    size_t tl = strlen(text);
+    bool space = tl && text[tl - 1] != ' ' && o->f.purpose != IM_P_EMAIL && o->f.purpose != IM_P_URL;
+    snprintf(t, sizeof t, "%s%s", text, space ? " " : "");
+    put_text(o, t, now);
+    memset(t, 0, sizeof t);
+    drop_first(o, n, now);
+    readings_clear(o);
+    o->pp.fixing = false;
+    memset(o->pp.fix, 0, sizeof o->pp.fix);
+    if (o->pp.ns) ask_read(o, now);
+    after_edit(o, now);
+    paper_draw(o);
+}
+
+static void show_pending(struct osk *o)
+{
+    if (!o->pp.ncand || !o->read_fresh || o->pp.drawing || !o->pp.cand[0][0]) return;
+    o->pp.pending = true;
+    o->pp.pending_n = o->pp.ns;
+    snprintf(o->pending_text, sizeof o->pending_text, "%s", o->pp.cand[0]);
+    preedit(o, o->pending_text);
+    paper_draw(o);
+}
+
+/* where the last word of s[0..n) starts: back over the spaces after it, then to the space
+ * before it (a word as written: "3pm," goes as a whole) */
+static size_t written_word_start(const char *s, size_t n)
+{
+    size_t e = n;
+    while (e > 0 && (s[e - 1] == ' ' || s[e - 1] == '\t')) e--;
+    while (e > 0 && s[e - 1] != ' ' && s[e - 1] != '\t' && s[e - 1] != '\n') e--;
+    return e;
+}
+
+/* the last word before the cursor (and the spaces after it) goes (FR-013) */
+static void delete_last_word(struct osk *o, int64_t now)
+{
+    size_t len;
+    const char *b = imf_before(&o->f, &len);
+    size_t ws = written_word_start(b, len), del = len - ws;
+    if (!del && !o->f.surrounding && o->last_hw[0]) {     /* nothing known: the paper's last text */
+        b = o->last_hw;
+        len = strlen(b);
+        ws = written_word_start(b, len);
+        del = len - ws;
+    }
+    if (!del) return;
+    if (o->f.surrounding) {
+        if (o->ops->im_preedit) o->ops->im_preedit(o->d, (uint32_t)del, "", "");
+    } else if (o->ops->backspaces) {
+        int cps = 0;
+        for (size_t i = ws; i < len; i++) cps += ((unsigned char)b[i] & 0xC0) != 0x80;
+        o->ops->backspaces(o->d, cps);
+    }
+    if (b != o->last_hw) imf_edit(&o->f, del, "", now);
+    o->last_hw[0] = 0;
+    after_edit(o, now);
+}
+
+/* text with a space before its k-th character (code points) */
+static void space_at(const char *text, int k, char *out, size_t n)
+{
+    size_t i = 0, len = strlen(text);
+    for (int c = 0; i < len && c < k; c++) i += (size_t)tr_dec(text + i, len - i, &(uint32_t){ 0 });
+    if (k < 0 || i > len) i = len;
+    snprintf(out, n, "%.*s %s", (int)i, text, text + i);
+}
+
+static void gesture(struct osk *o, char **f, int n, int64_t now)
+{
+    if (n < 8) return;
+    const char *kind = f[3];
+    int g = paper_find_num(&o->pp, atoi(f[4]));
+    if (g < 0 && o->pp.ns && !o->pp.drawing) g = o->pp.ns - 1;
+    if (g >= 0) {                       /* the gesture isn't writing: gone from the paper too */
+        if (g < o->pp.pending_n) o->pp.pending_n--;
+        paper_remove(&o->pp, g);
+    }
+    int cov[256], nc = 0;
+    if (strcmp(f[6], "-"))
+        for (char *p = f[6]; *p && nc < 256; ) {
+            cov[nc++] = atoi(p);
+            p = strchr(p, ',');
+            if (!p) break;
+            p++;
+        }
+    bool others = o->pp.ns > 0;
+    if (!strcmp(kind, "scratch")) {     /* scratched out: the pending text is discarded */
+        if (nc && o->pp.pending) {
+            drop_first(o, o->pp.pending_n, now);
+            preedit(o, "");
+            readings_clear(o);
+        } else if (nc) {
+            remove_nums(o, cov, nc, now);
+        }
+        if (o->pp.ns) ask_read(o, now);
+        else if (!o->pp.pending) readings_clear(o);
+    } else if (!strcmp(kind, "strike")) {
+        if (nc) {                       /* struck through: those characters go */
+            remove_nums(o, cov, nc, now);
+            if (o->pp.ns) {
+                ask_read(o, now);
+                o->pause_at = now;      /* the new reading shows as soon as it is there */
+            } else {
+                preedit(o, "");
+                readings_clear(o);
+            }
+        } else if (!others) {
+            delete_last_word(o, now);
+        } else {
+            ask_read(o, now);
+        }
+    } else if (!strcmp(kind, "caret")) { /* a space */
+        int k = f[7][0] == '@' ? atoi(f[7] + 1) : -1;
+        if (!others) {
+            put_text(o, " ", now);
+            after_edit(o, now);
+        } else if (o->pp.pending) {
+            char t[PAPER_TEXT_MAX + 2];
+            space_at(o->pending_text, k, t, sizeof t);
+            commit_reading(o, t, NULL, now);
+        } else {
+            o->caret_at = k < 0 ? 0 : k;
+            ask_read(o, now);
+        }
+    }
+    paper_draw(o);
+}
+
+static void hw_got_line(void *d, char **f, int n, int64_t now)
+{
+    struct osk *o = d;
+    const char *verb = f[0], *id = f[1];
+    if (!strcmp(verb, "stroke")) {
+        int i = n >= 4 && !strcmp(f[2], "ok") ? paper_find_id(&o->pp, id) : -1;
+        if (i >= 0) o->pp.s[i].num = atoi(f[3]);
+        return;
+    }
+    if (!strcmp(verb, "confirm")) {     /* a lesson kept: the note says so */
+        if (!o->confirm_id[0] || strcmp(id, o->confirm_id)) return;
+        o->confirm_id[0] = 0;
+        if (n >= 4 && !strcmp(f[2], "ok") && o->paper_up) {
+            snprintf(o->pp.note, sizeof o->pp.note, "%s", PAPER_NOTE_LEARNED);
+            o->paper_note_until = now + PAPER_NOTE_MS;
+            paper_draw(o);
+        }
+        return;
+    }
+    if (!strcmp(verb, "error")) {
+        if (n >= 3 && !strcmp(f[2], "unknown-session")) o->session = false;
+        if (o->want_read[0] && !strcmp(id, o->want_read)) o->want_read[0] = 0;
+        if (o->confirm_id[0] && !strcmp(id, o->confirm_id)) o->confirm_id[0] = 0;
+        return;
+    }
+    if (!strcmp(verb, "begin")) {
+        if (n >= 3 && strcmp(f[2], "ok")) o->session = false;   /* private: nothing kept */
+        return;
+    }
+    if (strcmp(verb, "read") || !o->want_read[0] || strcmp(id, o->want_read)) return;  /* drop, older */
+    o->want_read[0] = 0;
+    if (n >= 8 && !strcmp(f[2], "gesture")) { gesture(o, f, n, now); return; }
+    if (n < 4 || strcmp(f[2], "text")) {   /* empty, or not a reply of this version */
+        o->pp.ncand = 0;
+        o->read_fresh = true;
+        return;
+    }
+    int k = atoi(f[3]);
+    if (k < 0 || n != 4 + 3 * k) return;
+    if (o->pp.pending && o->pp.ns > o->pp.pending_n) {
+        /* writing on after the reading showed: that reading commits, the new ink is read alone */
+        char t[PAPER_TEXT_MAX];
+        snprintf(t, sizeof t, "%s", o->pending_text);
+        commit_reading(o, t, NULL, now);
+        memset(t, 0, sizeof t);
+        return;
+    }
+    int c = 0;
+    char cand[PAPER_CANDS][PAPER_TEXT_MAX];
+    for (int i = 0; i < k && c < PAPER_CANDS; i++) {
+        char *t = f[4 + 3 * i];
+        if (!hw_unesc(t) || !*t || strlen(t) >= PAPER_TEXT_MAX) continue;
+        bool dup = false;
+        for (int j = 0; j < c; j++) dup |= !strcmp(cand[j], t);
+        if (!dup) snprintf(cand[c++], PAPER_TEXT_MAX, "%s", t);
+    }
+    memcpy(o->pp.cand, cand, sizeof cand);
+    memset(cand, 0, sizeof cand);
+    o->pp.ncand = c;
+    o->read_fresh = true;
+    if (o->caret_at >= 0 && c) {        /* a caret was waiting for the reading */
+        char t[PAPER_TEXT_MAX + 2];
+        space_at(o->pp.cand[0], o->caret_at, t, sizeof t);
+        o->caret_at = -1;
+        commit_reading(o, t, NULL, now);
+        return;
+    }
+    if (o->pp.pending) {                /* a new reading of the same ink (after a strike) */
+        if (!c) {
+            preedit(o, "");
+            o->pp.pending = false;
+        } else {
+            o->pp.pending_n = o->pp.ns;
+            snprintf(o->pending_text, sizeof o->pending_text, "%s", o->pp.cand[0]);
+            preedit(o, o->pending_text);
+        }
+        paper_draw(o);
+    } else if (!o->pause_at) {
+        show_pending(o);
+    }
+}
+
+static void hw_stopped(void *d, bool crashed)
+{
+    struct osk *o = d;
+    o->session = false;
+    o->confirm_id[0] = 0;
+    if (o->want_read[0]) {              /* a reading was on its way: asked again */
+        o->want_read[0] = 0;
+        o->need_read = o->paper_up && o->pp.ns > 0;
+    }
+}
+
+static void paper_reset(struct osk *o)
+{
+    paper_clear(&o->pp);
+    readings_clear(o);
+    o->pp.fixing = false;
+    memset(o->pp.fix, 0, sizeof o->pp.fix);
+    o->pp.note[0] = 0;
+    o->paper_note_until = 0;
+    o->confirm_id[0] = 0;
+}
+
+bool osk_paper_open(struct osk *o, int64_t now)
+{
+    if (!want_recognizer(o)) return false;
+    if (o->paper_up) return true;
+    paper_reset(o);
+    o->paper_up = true;
+    session(o, now);                    /* the recognizer starts now: the first reading is quick */
+    set_view(o, OSK_VIEW_PAPER);
+    return true;
+}
+
+bool osk_show_pen(struct osk *o, int64_t now)
+{
+    return imf_empty(&o->f) && osk_paper_open(o, now);
+}
+
+void osk_paper_end(struct osk *o, int64_t now)
+{
+    if (!o->paper_up) return;
+    if (o->pp.pending && o->f.active && o->pending_text[0]) {
+        char t[PAPER_TEXT_MAX];
+        snprintf(t, sizeof t, "%s", o->pending_text);
+        commit_reading(o, t, NULL, now);
+        memset(t, 0, sizeof t);
+    }
+    session_end(o, now);
+    paper_reset(o);
+    o->paper_up = false;
+    refresh(o, now);
+}
+
+/* the field went or changed: what was pending can't reach it any more */
+static void paper_field(struct osk *o, int r, int64_t now)
+{
+    if (!o->paper_up) return;
+    if (r & IM_FOCUS_OFF) {
+        session_end(o, now);
+        paper_reset(o);
+    }
+    if (!want_recognizer(o)) {          /* no field, or a private one: no paper */
+        session_end(o, now);
+        paper_reset(o);
+        o->paper_up = false;
+        set_view(o, OSK_VIEW_KEYS);
+        return;
+    }
+    paper_draw(o);
+}
+
+void osk_paper_size(struct osk *o, int w, int h)
+{
+    paper_size(&o->pp, w, h);
+}
+
+void osk_pen_down(struct osk *o, double x, double y, double pressure, uint32_t t, int64_t now)
+{
+    if (!o->paper_up || fixing(o) || o->pp.drawing) return;
+    o->pause_at = 0;
+    struct paper_stroke *st = paper_stroke_new(&o->pp);
+    if (!st) return;
+    if (o->pp.ns == 1) o->t0 = t;
+    st->pressure = pressure >= 0;
+    paper_point(st, (float)x, (float)y, (float)(pressure < 0 ? 0 : pressure), (int32_t)(t - (uint32_t)o->t0));
+    o->pp.drawing = true;
+}
+
+void osk_pen_motion(struct osk *o, double x, double y, double pressure, uint32_t t)
+{
+    if (!o->paper_up || !o->pp.drawing || !o->pp.ns) return;
+    struct paper_stroke *st = &o->pp.s[o->pp.ns - 1];
+    paper_point(st, (float)x, (float)y, (float)(pressure < 0 ? 0 : pressure), (int32_t)(t - (uint32_t)o->t0));
+}
+
+void osk_pen_up(struct osk *o, int64_t now)
+{
+    if (!o->paper_up || !o->pp.drawing) return;
+    o->pp.drawing = false;
+    if (session(o, now)) send_unsent(o, now);
+    ask_read(o, now);
+    o->pause_at = now + o->pause_ms;
+}
+
+static void fix_set(struct osk *o, const char *text)
+{
+    snprintf(o->pp.fix, sizeof o->pp.fix, "%s", text);
+    preedit(o, o->pp.fix);              /* the pending text follows the edit */
+    paper_draw(o);
+}
+
+static void fix_leave(struct osk *o)
+{
+    o->pp.fixing = false;
+    memset(o->pp.fix, 0, sizeof o->pp.fix);
+    preedit(o, o->pending_text);
+    set_view(o, OSK_VIEW_PAPER);
+    refresh(o, 0);
+    paper_draw(o);
+}
+
+static void fix_use(struct osk *o, int64_t now)
+{
+    char t[PAPER_TEXT_MAX];
+    const char *s = o->pp.fix;
+    while (*s == ' ') s++;
+    snprintf(t, sizeof t, "%s", *s ? s : o->pending_text);
+    size_t l = strlen(t);
+    while (l && t[l - 1] == ' ') t[--l] = 0;
+    const char *source = strcmp(t, o->pending_text) ? "corrected" : "confirmed";
+    commit_reading(o, t, source, now);
+    memset(t, 0, sizeof t);
+    set_view(o, OSK_VIEW_PAPER);
+    refresh(o, now);
+}
+
+bool osk_paper_tap(struct osk *o, int x, int y, int64_t now)
+{
+    struct paper_item it;
+    if (!o->paper_up || paper_hit(&o->pp, x, y, &it) < 0) return false;
+    switch (it.kind) {
+    case PI_CHIP:
+        if (o->pp.pending && it.cand >= 0 && it.cand < o->pp.ncand) {
+            char t[PAPER_TEXT_MAX];
+            snprintf(t, sizeof t, "%s", o->pp.cand[it.cand]);
+            /* an alternative picked: a lesson; the read text tapped: as it was read */
+            commit_reading(o, t, it.cand ? "picked" : NULL, now);
+            memset(t, 0, sizeof t);
+        }
+        break;
+    case PI_FIX:
+        if (!o->pp.pending) break;
+        o->pp.fixing = true;
+        o->pause_at = 0;
+        snprintf(o->pp.fix, sizeof o->pp.fix, "%s", o->pending_text);
+        set_view(o, OSK_VIEW_PAPER_KEYS);
+        refresh(o, now);
+        paper_draw(o);
+        break;
+    case PI_USE:
+        fix_use(o, now);
+        break;
+    case PI_KEYS:
+        osk_paper_end(o, now);
+        set_view(o, OSK_VIEW_KEYS);
+        break;
+    case PI_CLOSE:
+        osk_paper_end(o, now);
+        set_view(o, OSK_VIEW_HIDDEN);
+        break;
+    default:
+        break;
+    }
+    return true;
+}
+
+bool osk_key_capture(struct osk *o, uint32_t code, int64_t now)
+{
+    if (!fixing(o)) return false;
+    if (code == KEY_ENTER_ || code == KEY_KPENTER_) fix_use(o, now);
+    return true;                        /* no key reaches the app while a reading is corrected */
+}
+
+static void paper_tick(struct osk *o, int64_t now)
+{
+    if (!o->paper_up) return;
+    if (o->pause_at && now >= o->pause_at) {
+        o->pause_at = 0;
+        if (!o->pp.pending) show_pending(o);
+    }
+    if (o->paper_note_until && now >= o->paper_note_until) {
+        o->paper_note_until = 0;
+        o->pp.note[0] = 0;
+        paper_draw(o);
+    }
+    if (o->need_read && now >= o->hw.restart_ms) ask_read(o, now);
 }

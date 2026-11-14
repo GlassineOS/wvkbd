@@ -187,5 +187,120 @@ ptr tap 460 875; ptr tap 180 825
 expect "a missing predictor: typing works" "$(last)" "he|2"
 kbd_stop
 
+# handwriting (FR-010..FR-013a): the paper is the input method's popup at the field's cursor
+# (-c 0,0,2,20 in the field's window, under its title bar: the paper's surface, 800x300 with
+# 1 em = 90 px, starts at screen 2,45, so surface y = screen y - 45). A tablet
+# can't be made in a headless compositor: the strokes are drawn with the virtual pointer,
+# which is how sway hands a pen to a client that doesn't bind the tablet protocol. The
+# stand-in recognizer reads the ink as w<strokes> (alternatives a<n>, b<n>).
+# Controls (surface px; the top row y 12..62 = screen y 57..107): the chips at x 13..207 (an alternative),
+# 217..411 (the read text), 421..615, the correction 625..675, keys 688..738, put away 738..788.
+HW=${HW:-python3 -u /src/test/fake-recognizer.py}
+pkbd() { $B/wvkbd/wvkbd-mobintl --im --hidden --strip -H 300 --no-popup -o -D -l full,special \
+          --predictor "python3 -u /src/test/fake-predict.py" --handwriting "$HW" \
+          --pen-flag /tmp/penflag > /tmp/kbd.out 2>/tmp/kbd.err & KP=$!; sleep 0.5; }
+pen_tap() { touch /tmp/penflag; kill -USR2 $KP; sleep 0.6; }
+preedit() { grep '^preedit' /tmp/ti.out | tail -1 | cut -c9-; }
+lastview() { grep '^view' /tmp/kbd.err | tail -1 | cut -c6-; }       # 0 keys 1 paper 2 both 3 hidden
+keys_up() { [ "$(grep -E '^(hidden|Resize)' /tmp/kbd.err | tail -1 | cut -c1-6)" = Resize ]; }
+: > /tmp/hw.log
+FAKE_LOG=/tmp/hw.log pkbd
+field -c 0,0,2,20
+pen_tap
+check "a pen tap into an empty field: the paper, not the keys" "grep -q '^Paper 800x300' /tmp/kbd.err && ! grep -q '^Resize' /tmp/kbd.err"
+check "... under the field's cursor" "grep -q '^Paper: the cursor at 0,-20 2x20' /tmp/kbd.err"
+ptr stroke 100,200 150,230 200,210 250,240
+ptr stroke 300,200 350,230 380,215
+check "the strokes reach the recognizer as they are written" "[ \$(grep -c '^stroke' /tmp/hw.log) = 2 ] && grep -q '^read' /tmp/hw.log"
+check "... in em (x,y,t)" "grep -Eq '^stroke.h[0-9]+.s[0-9]+.1\\.0889,1\\.7222,[0-9]+ ' /tmp/hw.log"
+expect "before the pause: nothing in the field" "$(last)" "|0"
+sleep 1.2
+expect "after the pause: the reading is pending text" "$(preedit)" "w2"
+pen_tap                             # the session's show for the pen again (a re-focus): the paper stays
+check "a pen show while the paper is up: it stays" "! grep -q '^Paper hidden' /tmp/kbd.err && [ \"\$(preedit)\" = w2 ]"
+expect "... nothing committed yet" "$(last)" "|0"
+ptr tap 100 80                      # the left chip: an alternative
+sleep 0.4
+expect "an alternative tapped: committed, a space after" "$(last)" "a2 |3"
+check "... the lesson (picked)" "grep -q \"$(printf '^confirm\th[0-9]*\ts[0-9]*\tpicked\ta2')\" /tmp/hw.log"
+ptr stroke 100,200 150,230 200,210 250,240
+sleep 1.2
+ptr stroke 400,200 450,230 500,210
+sleep 0.4
+expect "writing on: the reading commits as it was" "$(last)" "a2 w1 |6"
+expect "... no lesson for it" "$(grep -c '^confirm' /tmp/hw.log)" "1"
+sleep 1.2
+ptr stroke 60,200 300,201 560,200   # a strike-through over the pending ink
+sleep 0.6
+expect "a strike-through over pending text: read again without it" "$(preedit)" ""
+expect "... nothing committed" "$(last)" "a2 w1 |6"
+ptr stroke 60,200 300,201 560,200   # and on the bare paper: the last word
+sleep 0.6
+expect "a strike-through on the bare paper: the last word goes" "$(last)" "a2 |3"
+ptr stroke 100,200 150,230 200,210 250,240
+sleep 1.2
+ptr tap 713 80                      # keys
+sleep 0.5
+expect "the keys control: the pending text commits" "$(last)" "a2 w1 |6"
+check "... the keys come" "grep -q '^Resize 800x350' /tmp/kbd.err && grep -q '^Paper hidden' /tmp/kbd.err"
+ptr tap 40 675                      # the pen key in the strip
+sleep 0.5
+check "the pen key: the paper again (any field)" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 2 ]"
+ptr tap 763 80                      # put away
+sleep 0.5
+check "put away: all of it goes" "[ \"\$(lastview)\" = 3 ] && tail -3 /tmp/kbd.err | grep -q '^Paper hidden' && ! keys_up"
+field -c 0,0,2,20 -t "hi"
+pen_tap
+check "a pen tap into a field with text: the keys" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 2 ] && keys_up"
+for p in "8 0 password" "9 0 pin" "0 128 sensitive_data" "0 64 hidden_text"; do
+    set -- $p
+    : > /tmp/hw.log
+    field -c 0,0,2,20 -p $1 -H $2
+    pen_tap
+    ptr stroke 100,200 150,230 200,210
+    sleep 0.3
+    check "private $3: no paper" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 2 ]"
+    expect "private $3: nothing to the recognizer" "$(cat /tmp/hw.log)" ""
+done
+kbd_stop
+
+# a missing recognizer: the paper takes ink, typing goes on
+HW=/nonexistent/glassine-handwriting pkbd
+field -c 0,0,2,20
+pen_tap
+ptr stroke 100,200 150,230 200,210
+sleep 1.2
+check "a missing recognizer: the keyboard stays" "kill -0 $KP"
+expect "... nothing pending" "$(preedit)" ""
+ptr tap 713 80; sleep 0.5
+ptr tap 460 875; ptr tap 180 825
+expect "... typing works" "$(last)" "he|2"
+kbd_stop
+
+# the real recognizer with a trained model (HW_SRC and HW_MODELS given to test.sh):
+# its reading lands as pending text, Use of the correction commits with a lesson
+if [ -x /tmp/b/glassine-handwriting ] && [ -d /models ]; then
+    export GLASSINE_HANDWRITING_MODELS=/models XDG_CONFIG_HOME=/tmp/hwcfg XDG_DATA_HOME=/tmp/hwdata
+    HW=/tmp/b/glassine-handwriting pkbd
+    field -c 0,0,2,20
+    pen_tap
+    # "lo" on the guide line (the paper's y 200 = screen 245)
+    ptr stroke 120,145 118,185 116,225 115,245 125,247
+    ptr stroke 170,215 155,225 152,240 165,249 180,240 182,225 170,215
+    sleep 2.5
+    check "real recognizer: a reading is pending" "[ -n \"\$(preedit)\" ]"
+    p=$(preedit)
+    ptr tap 652 80                  # the correction: the reading in the edit field
+    sleep 0.4
+    check "real recognizer: correcting shows the keys under the paper" "[ \"\$(lastview)\" = 2 ] && keys_up"
+    ptr tap 740 975                 # Enter: Use
+    sleep 1
+    expect "real recognizer: Use commits the reading" "$(last)" "$p |$(( $(printf '%s' "$p" | wc -m) + 1 ))"
+    check "real recognizer: still running" "kill -0 $KP"
+    kbd_stop
+else
+    echo "skip the real recognizer (test.sh: HW_SRC=handwriting checkout HW_MODELS=dir with en/recognizer.ghm)"
+fi
+
 [ $fail = 0 ] || { echo "--- keyboard"; tail -20 /tmp/kbd.err; echo "--- field"; tail -20 /tmp/ti.out; }
 exit $fail

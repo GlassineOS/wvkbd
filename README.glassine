@@ -30,10 +30,32 @@ wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus these changes:
       --notify SOCKET  focus reports to the session ("osk focus 1 PURPOSE",
                        "osk focus 0", "osk changed", "osk im")
     $XDG_CONFIG_HOME/glassine/predict.conf: "suggestions = off" leaves the strip
-    empty and sends nothing, "handwriting = off" hides the pen key; read at each
-    field focus.
+    empty and sends nothing, "handwriting = off" hides the pen key and the
+    paper, "handwriting_pause = MS" (200..5000, default 800) is the pause after
+    which the written text shows; read at each field focus.
+  - handwriting (spec 006 FR-010..FR-013a), behind --handwriting: a writing
+    paper laid over the app under the field's cursor (the input method's
+    popup); the keyboard draws the ink itself and registers the paper as an
+    ink area (pen brush) where the compositor has glassine-ink-v1. Each
+    stroke goes to the recognizer at once; after a pause the reading is the
+    field's pending text with two alternatives and a correction control above
+    the ink. Writing on commits it; a picked alternative or a correction
+    commits it as a lesson. A strike-through deletes the struck characters
+    (on bare paper: the last word), a scratch-out discards the pending text,
+    a caret inserts a space. The pen draws (pointer events: a tablet pen as
+    the compositor hands it to a client without tablet support); a finger
+    only taps the controls. Private fields: no paper, nothing sent.
+      --handwriting CMD  the recognizer (docs/recognizer.md of
+                         GlassineOS/handwriting), started on the first stroke;
+                         the pen key opens the paper. Missing or crashed: ink
+                         without readings, typing unaffected
+      --pen-flag FILE    the session creates FILE before a show after a pen
+                         tap: the paper instead of the keys, in an empty field
+      --paper-height PX  the paper's height (default: the keys')
     Files: im.c (the field), predict.c (the predictor client), strip.c (the
-    strip), osk.c (the three together; no Wayland, host-tested), textrules.h.
+    strip), hw.c (the recognizer client), paper.c (the paper's model and
+    layout; drawn in keyboard.c), osk.c (all of them together; no Wayland,
+    host-tested), textrules.h.
 
 Without the new options, and on upstream's layers, the keyboard behaves as
 upstream's.
@@ -43,12 +65,14 @@ Branches:
   glassine/0.16   the release Alpine 3.22 packaged (kept)
 
 Build: as upstream (make; needs wayland, pango, cairo, xkbcommon, scdoc).
-Tests: make check (host unit tests; python3 for the stand-in predictor;
-GLASSINE_PREDICT=path adds the real one), make check-e2e (headless sway in a
-Docker container: typing, picks, Backspace, private fields, pads, settings),
-make check-toolkits GLASSINE_SHELL=path (picks in GTK 3 and 4, Firefox and
-Chromium fields and Chromium's address bar, with the real predictor built from
-a GlassineOS/shell checkout; Docker, slow).
+Tests: make check (host unit tests; python3 for the stand-in predictor and
+recognizer; GLASSINE_PREDICT=path adds the real predictor), make check-e2e
+(headless sway in a Docker container: typing, picks, Backspace, private fields,
+pads, settings, the paper with strokes from a virtual pointer;
+HW_SRC=handwriting-checkout HW_MODELS=dir-with-en/recognizer.ghm adds a run with
+the real recognizer), make check-toolkits GLASSINE_SHELL=path (picks in GTK 3
+and 4, Firefox and Chromium fields and Chromium's address bar, with the real
+predictor built from a GlassineOS/shell checkout; Docker, slow).
 
 The license is upstream's (GPL-3.0, LICENSE). Commits made with AI assistance
 carry an Assisted-by: trailer. They are not submitted upstream; see the

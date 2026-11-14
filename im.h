@@ -53,6 +53,7 @@ struct im_field {
     size_t sel_start;           /* where it starts in the view (len: at the cursor or after) */
     char before[IM_VIEW_MAX + 1];
     size_t len;
+    size_t after;               /* bytes after the cursor in the app's last report */
     /* the texts before the cursor the field had during own edits on their way (a hash
      * and length each): a report of one of them is late */
     struct { uint64_t h; size_t len; } old[IM_OLD_MAX];
@@ -109,6 +110,9 @@ bool imf_unconfirmed(const struct im_field *f);
 const char *imf_before(const struct im_field *f, size_t *len);
 size_t imf_word_start(const struct im_field *f);    /* the word being typed: before[start..len) */
 bool imf_sentence_start(const struct im_field *f);
+/* the field holds no text (as far as the keyboard knows: what the app reported, else what
+ * was typed into it since it was focused) */
+bool imf_empty(const struct im_field *f);
 /* bytes Backspace removes through the input method (0: send the key instead) */
 size_t imf_backspace_bytes(const struct im_field *f);
 

@@ -3,6 +3,7 @@
 
 #include "drw.h"
 #include "osk.h"
+#include "paperdraw.h"
 
 #define MAX_LAYERS 25
 
