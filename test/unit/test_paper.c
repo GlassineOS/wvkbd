@@ -101,7 +101,7 @@ static long log_size(void)
     return stat(logpath, &st) ? 0 : (long)st.st_size;
 }
 
-static void run(struct osk *k, int ms)
+static void run_exact(struct osk *k, int ms)
 {
     int64_t end = now_ms() + ms;
     for (int64_t now; (now = now_ms()) < end;) {
@@ -115,6 +115,15 @@ static void run(struct osk *k, int ms)
         if (n) osk_handle(k, fds, n, now);
         osk_tick(k, now);
     }
+}
+
+/* ms, then on while requests wait for their answers (up to 3 s more: a loaded machine
+ * starts python slowly; the checks are about what happens, not how fast) */
+static void run(struct osk *k, int ms)
+{
+    run_exact(k, ms);
+    for (int64_t end = now_ms() + 3000; k->hw.waiting > 0 && hw_running(&k->hw) && now_ms() < end;)
+        run_exact(k, 10);
 }
 
 static void conf(const char *text)
@@ -265,7 +274,7 @@ static void test_client(void)
     focus(IM_P_NORMAL, 0, "", true);
     osk_paper_open(&o, now_ms());
     write_letter(100);
-    run(&o, 200);
+    run_exact(&o, 200);
     CHECK("crash: counted, with a backoff", o.hw.crashes == 1 && o.hw.restart_ms > now_ms());
     setenv("FAKE_MODE", "ok", 1);
     run(&o, HW_BACKOFF_MS + PAUSE + 300);
@@ -281,7 +290,7 @@ static void test_client(void)
     int64_t t0 = now_ms();
     write_letter(100);
     CHECK("slow: the pen never waits", now_ms() - t0 < 50);
-    run(&o, PAUSE + 50);
+    run_exact(&o, PAUSE + 50);
     CHECK("slow: no reading before its answer", !o.pp.pending);
     run(&o, 800);
     CHECK_STR("slow: shown when it arrives", pre, "w1");
@@ -314,7 +323,7 @@ static void test_client(void)
     focus(IM_P_NORMAL, 0, "", true);
     osk_paper_open(&o, now_ms());
     write_letter(100);
-    run(&o, HW_HUNG_MS + 200);
+    run_exact(&o, HW_HUNG_MS + 200);
     CHECK("hang: stopped as a crash", o.hw.crashes == 1 && !hw_running(&o.hw));
     osk_finish(&o);
 }
@@ -326,8 +335,9 @@ static void test_writing(void)
     focus(IM_P_NORMAL, 0, "", true);
     CHECK("offered in a normal field", osk_paper_offered(&o) && osk_field_empty(&o));
     CHECK("a pen tap into the empty field opens the paper", osk_show_pen(&o, now_ms()) && view == OSK_VIEW_PAPER);
+    run(&o, 1);                         /* the recognizer up */
     osk_paper_size(&o, 800, 300);
-    CHECK("the recognizer starts with the paper", hw_running(&o.hw) && log_count("begin") == 0 /* not written yet */ + 0);
+    CHECK("the recognizer starts with the paper", hw_running(&o.hw) && log_count("begin") == 1);
     write_letter(100);
     run(&o, 50);
     CHECK_INT("a stroke is sent at once", log_count("stroke"), 1);

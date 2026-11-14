@@ -1276,6 +1276,10 @@ static void
 session_show(void)
 {
     bool pen = pen_flag && unlink(pen_flag) == 0;
+    if (keyboard.osk && pen && osk.paper_up) {     /* the pen again (writing, a re-focus): it stays */
+        hidden = false;
+        return;
+    }
     if (keyboard.osk && pen && osk_show_pen(keyboard.osk, monotime())) {
         hidden = false;
         return;

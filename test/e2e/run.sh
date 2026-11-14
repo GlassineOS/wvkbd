@@ -216,6 +216,8 @@ check "... in em (x,y,t)" "grep -Eq '^stroke.h[0-9]+.s[0-9]+.1\\.0889,1\\.7222,[
 expect "before the pause: nothing in the field" "$(last)" "|0"
 sleep 1.2
 expect "after the pause: the reading is pending text" "$(preedit)" "w2"
+pen_tap                             # the session's show for the pen again (a re-focus): the paper stays
+check "a pen show while the paper is up: it stays" "! grep -q '^Paper hidden' /tmp/kbd.err && [ \"\$(preedit)\" = w2 ]"
 expect "... nothing committed yet" "$(last)" "|0"
 ptr tap 100 80                      # the left chip: an alternative
 sleep 0.4
