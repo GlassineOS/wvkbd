@@ -197,6 +197,7 @@ void osk_im_surrounding(struct osk *o, const char *t, uint32_t c, uint32_t a) { 
 void osk_im_cause(struct osk *o, uint32_t c) { imf_cause(&o->f, c); }
 void osk_im_content_type(struct osk *o, uint32_t h, uint32_t p) { imf_content_type(&o->f, h, p); }
 uint32_t osk_serial(const struct osk *o) { return o->f.serial; }
+void osk_im_new(struct osk *o) { o->f.serial = 0; }
 
 void osk_im_done(struct osk *o, int64_t now)
 {
