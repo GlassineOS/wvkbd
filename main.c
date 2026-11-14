@@ -625,6 +625,7 @@ im_bind(void)
     im_retry_at = -1;
     input_method = zwp_input_method_manager_v2_get_input_method(im_mgr, seat);
     zwp_input_method_v2_add_listener(input_method, &input_method_listener, NULL);
+    osk_im_new(&osk);           /* a new object: its commits count its own done events */
 }
 
 /* ---- glassine: osk_ops (osk.h) ---- */

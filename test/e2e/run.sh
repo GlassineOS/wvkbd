@@ -141,6 +141,35 @@ ptr tap 40 675
 check "handwriting off: no pen key" "[ ! -e /tmp/pen ]"
 kbd_stop
 
+# the session's way (glassine-wvkbd of GlassineOS/shell): no --auto, focus reports on a datagram
+# socket (a stand-in for glassine-swayd), the hide key runs a command, and another input method
+# holds the seat first (on a real boot glassine-swayd's): "osk im", then retried until it is free
+python3 -c '
+import os, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.bind(sys.argv[1])
+with open(sys.argv[2], "a") as f:
+    while True: f.write(s.recv(256).decode() + "\n"); f.flush()
+' /tmp/rt/swayd.sock /tmp/notify.log & NP=$!
+$B/wvkbd/wvkbd-mobintl --im --hidden -l full,special > /dev/null 2>&1 & HP=$!; sleep 0.5
+rm -f /tmp/hid; : > /tmp/predict.log
+$B/wvkbd/wvkbd-mobintl --hidden -H 300 -L 240 --no-popup -l full,special --landscape-layers landscape,landscapespecial \
+    --im --strip --notify /tmp/rt/swayd.sock --hide-cmd "touch /tmp/hid" \
+    --predictor "python3 -u /src/test/fake-predict.py" > /dev/null 2>/tmp/kbd.err & KP=$!; sleep 1
+check "the seat's input method taken: the session is told (osk im)" "grep -qx 'osk im' /tmp/notify.log"
+kill $HP; wait $HP 2>/dev/null; sleep 3.5     # the retries: 1 s, 2 s
+field
+check "then it is the input method: the focus reported" "grep -qx 'osk focus 1 0' /tmp/notify.log"
+check "... and nothing shown by itself (no --auto)" "! grep -q '^Resize' /tmp/kbd.err"
+kill -USR2 $KP; sleep 0.5
+ptr tap 460 875; ptr tap 180 825
+expect "shown by the session: typing commits text" "$(last)" "he|2"
+check "... words asked for" "grep -q \"$(printf 'predict\tk[0-9]*\ten\tnormal\t\the')\" /tmp/predict.log"
+ptr tap 760 675; sleep 0.3
+check "the hide key runs the session's command" "[ -e /tmp/hid ]"
+field_stop; sleep 0.3
+check "the field goes: reported" "tail -2 /tmp/notify.log | grep -qx 'osk focus 0 0'"
+kbd_stop; kill $NP 2>/dev/null
+
 # a missing predictor: typing goes on
 $B/wvkbd/wvkbd-mobintl --im --auto --hidden --strip -H 300 --predictor /nonexistent/predictor -l full,special > /dev/null 2>/tmp/kbd.err & KP=$!; sleep 0.5
 field

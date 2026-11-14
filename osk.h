@@ -73,7 +73,8 @@ void osk_im_surrounding(struct osk *o, const char *text, uint32_t cursor, uint32
 void osk_im_cause(struct osk *o, uint32_t cause);
 void osk_im_content_type(struct osk *o, uint32_t hints, uint32_t purpose);
 void osk_im_done(struct osk *o, int64_t now);
-uint32_t osk_serial(const struct osk *o);
+uint32_t osk_serial(const struct osk *o);   /* the done events of the current object */
+void osk_im_new(struct osk *o);             /* a new input method object: serial from 0 */
 
 void osk_visible(struct osk *o, bool on, int64_t now);
 /* the keyboard's keys in predict.conf (suggestions, handwriting), read again at each
