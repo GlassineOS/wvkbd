@@ -54,6 +54,9 @@ expect "Backspace deletes through the input method" "$(last)" "I say hela|10"
 check "no Backspace key event" "! grep -q '^key 14 ' /tmp/ti.out"
 ptr tap 740 975                     # Enter
 check "Enter is a key event" "grep -q '^key 28 1' /tmp/ti.out"
+sleep 0.3
+expect "the picked word, its space deleted, then Enter: learned once" \
+    "$(grep -c "$(printf '^learn\tk[0-9]*\ten\tnormal\tI say \thela\t')" /tmp/predict.log)" "1"
 ptr tap 360 825; ptr tap 180 825    # t e
 sleep 0.3
 t0=$(last)
@@ -116,6 +119,13 @@ kbd -l german,special
 field
 ptr tap 760 825; ptr hold 40 825 600; sleep 0.5
 expect "ü and the held ! arrive as text" "$(last)" "ü!|3"
+kbd_stop
+
+# the English layer's alternates: held q and . type ! and :
+kbd -l full,special
+field
+ptr tap 40 825; ptr hold 40 825 600; sleep 0.3; ptr hold 640 975 600; sleep 0.8
+expect "a tapped q, the held ! and : arrive as text" "$(last)" "q!:|3"
 kbd_stop
 
 # an app without text input: plain keys, nothing for the predictor
