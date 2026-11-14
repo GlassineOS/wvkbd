@@ -14,6 +14,12 @@
 
 #define MAX_LAYERS 25
 
+/* glassine: the key a Copy key's (and a hold's) character is put on in the temporary
+ * keymap: evdev KEY_UNKNOWN (xkb <I248>), which no application gives a meaning.
+ * Upstream uses KEY_COMPOSE (127, <COMP>), the Menu key: Chromium opens its
+ * context menu on that key code, whatever character it carries */
+#define KBD_UNICODE_KEY 240
+
 /* glassine: long press (see struct kbd). The timer is main.c's timerfd */
 int kbd_hold_timer_fd = -1;
 static bool hold_skip_press_draw;   /* the held key is drawn pressed already */
@@ -364,7 +370,7 @@ kbd_unpress_key(struct kbd *kb, uint32_t time)
 
         if (kb->last_press->type == Copy) {
             if (kb->debug) fprintf(stderr, "release copy key (unlatch_shift=%d, mods=%d)\n", unlatch_shift, kb->mods);
-            zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, // COMP key
+            zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, // the unicode key
                                         WL_KEYBOARD_KEY_STATE_RELEASED);
         } else {
             if (kb->debug) fprintf(stderr, "release key %d", kb->last_press->code);
@@ -498,8 +504,8 @@ kbd_hold_fire(struct kbd *kb)
     if (kb->debug) fprintf(stderr, "hold: %s -> U+%04X\n", k->label, k->hold);
     create_and_upload_keymap(kb, kb->layout->keymap_name, k->hold);
     zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
-    zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, WL_KEYBOARD_KEY_STATE_PRESSED);   // COMP key
-    zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, WL_KEYBOARD_KEY_STATE_RELEASED);
+    zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_PRESSED);   // the unicode key
+    zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_RELEASED);
     if ((kb->print || kb->print_intersect) && k->hold_label) {
         printf("%s", k->hold_label);
         fflush(stdout);
@@ -652,7 +658,7 @@ kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time)
             create_and_upload_keymap(kb, kb->layout->keymap_name, k->code);
         }
         zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
-        zwp_virtual_keyboard_v1_key(kb->vkbd, time, 127, // COMP key
+        zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, // the unicode key
                                     WL_KEYBOARD_KEY_STATE_PRESSED);
         if (kb->print || kb->print_intersect)
             kbd_print_key_stdout(kb, k);
