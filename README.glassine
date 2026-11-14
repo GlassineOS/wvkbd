@@ -2,7 +2,7 @@ GlassineOS wvkbd
 ================
 
 This branch is the on-screen keyboard of GlassineOS (https://github.com/GlassineOS):
-wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus two changes, one commit
+wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus three changes, one commit
 each:
 
   - themable keys: --stroke, --stroke-sp, --stroke-width and --gap (the shell
@@ -11,8 +11,12 @@ each:
     branch uses upstream's. A swiped key's label is --text's unless --text-swipe
     is given (upstream's default is white), as it was in 0.16.
   - a German QWERTZ layer ("german") with umlauts
+  - long press (--hold MS, default 400, 0: off): a held key types the
+    alternate printed in its corner (":" on ".", ";" on ",", symbols on the
+    letters). Only the German layer has alternates.
 
-Without the new options the keyboard behaves as upstream's.
+Without the new options, and on upstream's layers, the keyboard behaves as
+upstream's.
 
 Branches:
   glassine/0.21   what GlassineOS builds

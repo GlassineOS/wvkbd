@@ -60,6 +60,7 @@ struct clr_scheme {
 	char *font;
 	int rounding;
 	PangoFontDescription *font_description;
+	PangoFontDescription *hint_font_description; /* glassine: the hold alternate's label */
 };
 
 struct key {
@@ -80,6 +81,10 @@ struct key {
 	  shift_code;            /* shift_code: secondary scancode */
 	uint8_t scheme;          // index of the scheme to use
 	bool reset_mod;          /* reset modifiers when clicked */
+	/* glassine: long press. A held key types this unicode character instead
+	 * (as a Copy key does) and shows hold_label small in its corner */
+	const uint32_t hold;
+	const char *hold_label;
 
 	// actual coordinates on the surface (pixels), will be computed automatically
 	// for all keys
@@ -121,6 +126,14 @@ struct kbd {
 	size_t last_abc_index; //the layer index of the last alphabetical layout
 	int64_t last_press_offset; // Delta between processor and compositor time during `last_press`
 
+	/* glassine: long press. A key with a hold alternate types nothing on
+	 * press: on release before hold_ms its own character, after hold_ms (the
+	 * timer, kbd_hold_fire) the alternate. hold_ms 0: off */
+	int hold_ms;
+	struct key *hold_key;    /* pressed, not yet resolved */
+	bool hold_fired;         /* the alternate was typed */
+	int64_t hold_offset;     /* compositor time - monotime() at the press */
+
 	struct layout *layouts;
 	struct Output *output; //only used to keep track of landscape flipping, never dereferenced
 	enum layout_id *layers;
@@ -160,6 +173,9 @@ void kbd_next_layer(struct kbd *kb, struct key *k, bool invert);
 void kbd_switch_layout(struct kbd *kb, struct layout *l, size_t layer_index);
 void create_and_upload_keymap(struct kbd *kb, const char *name, uint32_t comp_unichr);
 int64_t monotime();
+/* glassine: long press; main.c owns the timer (a timerfd, -1: none) */
+extern int kbd_hold_timer_fd;
+void kbd_hold_fire(struct kbd *kb);
 
 #ifndef LAYOUT
 #error "make sure to define LAYOUT"

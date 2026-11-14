@@ -1355,7 +1355,8 @@ xkb_symbols \"(unnamed)\" {\
         key <HJCV>               {	[    Hangul_Hanja ] };\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
-        key <COMP>               {	[       U%08X, U%08X ] };\
+        key <COMP>               {	[            Menu ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -2818,7 +2819,8 @@ xkb_symbols \"(unnamed)\" {\
         key <HJCV>               {	[    Hangul_Hanja ] };\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
-        key <COMP>               {	[       U%08X, U%08X ] };\
+        key <COMP>               {	[            Menu ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -4279,7 +4281,8 @@ xkb_symbols \"(unnamed)\" {\
         key <HJCV>               {	[    Hangul_Hanja ] };\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
-        key <COMP>               {	[       U%08X, U%08X ] };\
+        key <COMP>               {	[            Menu ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -5743,7 +5746,8 @@ xkb_symbols \"(unnamed)\" {\
         key <HJCV>               {	[    Hangul_Hanja ] };\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
-        key <COMP>               {	[       U%08X, U%08X ] };\
+        key <COMP>               {	[            Menu ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -7207,7 +7211,8 @@ xkb_symbols \"(unnamed)\" {\
         key <HJCV>               {	[    Hangul_Hanja ] };\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
-        key <COMP>               {	[       U%08X, U%08X ] };\
+        key <COMP>               {	[            Menu ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -8671,7 +8676,8 @@ xkb_symbols \"(unnamed)\" {\
         key <HJCV>               {	[    Hangul_Hanja ] };\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
-        key <COMP>               {	[       U%08X, U%08X ] };\
+        key <COMP>               {	[            Menu ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
@@ -10131,7 +10137,8 @@ xkb_symbols \"(unnamed)\" {\
         key <HJCV>               {	[    Hangul_Hanja ] };\
         key <LWIN>               {	[         Super_L ] };\
         key <RWIN>               {	[         Super_R ] };\
-        key <COMP>               {	[       U%08X, U%08X ] };\
+        key <COMP>               {	[            Menu ] };\
+        key <AB11>               {	[       U%08X, U%08X ] };\
         key <STOP>               {	[          Cancel ] };\
         key <AGAI>               {	[            Redo ] };\
         key <PROP>               {	[        SunProps ] };\
