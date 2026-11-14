@@ -45,6 +45,9 @@ can be patched to add new features.
 *-L* _pixels_
 	Height of the keyboard in pixels, for horizontal/landscape mode
 
+*-R* _pixels_
+	Rounding radius of the keys in pixels.
+
 *--fn* _font_
 	set font and size (e.g. DejaVu Sans 20)
 
@@ -55,7 +58,8 @@ can be patched to add new features.
 	Long press: a key that has an alternate (printed small in its top right
 	corner) types it when held for _ms_ milliseconds; released sooner, it types
 	its own character. Keys without an alternate are unchanged. Default 400;
-	0 turns it off. Only the German layer has alternates.
+	0 turns it off. The letter keys and *,* and *.* of the full, landscape and
+	German layers have alternates.
 
 *--no-popup*
 	Disable the key-press popup (the magnified key shown above a key while
@@ -98,8 +102,50 @@ can be patched to add new features.
 	Set alpha value (i.e. transparency) for all colors [0-255]
 	
 *--auto*
-	Automatically toggle keyboard :visibility based on focus. Requires a compositor
-	that implements the zwp_input_method_v2 protocol.
+	Automatically toggle keyboard visibility based on focus. Requires a compositor
+	that implements the zwp_input_method_v2 protocol. Without *--im* the keyboard
+	only shows and hides; with it, see *INPUT METHOD*.
+
+*--im*
+	Be the input method: with a text field focused, text is committed to the
+	field, Backspace deletes through the input method where the field reports
+	its text, and other keys stay key events. The field's purpose picks the
+	keys (number, phone and PIN pads; an *@* row for email, a */* and *.com* row
+	for web addresses). See *INPUT METHOD*.
+
+*--strip*
+	With *--im*: a suggestion strip above the keys, with up to three words
+	(the likeliest in the middle), a pen key (*--pen-cmd*) and a hide key.
+
+*--strip-height* _pixels_
+	Height of the suggestion strip. Defaults to the height of one key row.
+
+*--predictor* _command_
+	The word predictor for the strip: _command_ is split at spaces (no shell)
+	and started as a child process whose standard input and output are one
+	end of a socket pair, for the predictor line contract (docs/predictor.md
+	of GlassineOS/shell). Missing, slow or crashed: the strip stays empty and
+	typing goes on; it is started again with a growing delay.
+
+*--lang* _languages_
+	Comma separated list of the languages sent to the predictor. Defaults to
+	the language of the active layout.
+
+*--notify* _socket_
+	Send focus reports to this Unix datagram socket, one line each, never
+	waiting for it: *osk focus 1* _purpose_ when a text field gets the focus
+	(_purpose_ is the field's text-input content purpose as a number),
+	*osk focus 0* when it loses it, *osk changed* at each other report of the
+	focused field (its text, cursor or type), and *osk im* when the seat
+	already has another input method.
+
+*--hide-cmd* _command_
+	The strip's hide key runs this (with _sh -c_) instead of hiding the
+	keyboard itself.
+
+*--pen-cmd* _command_
+	The strip's pen key (handwriting) runs this (with _sh -c_). Without it
+	there is no pen key.
 	
 *--bg* _rrggbb|aa_ 
 	Set color of background
@@ -128,12 +174,61 @@ can be patched to add new features.
 *--text-sp* _rrggbb|aa_       
 	Set color text on special keys
 
+*--text-press* _rrggbb|aa_
+	Set color of text on pressed keys
+
+*--text-press-sp* _rrggbb|aa_
+	Set color of text on pressed special keys
+
+*--text-swipe* _rrggbb|aa_
+	Set color of text on swiped keys. Defaults to the *--text* color.
+
+*--text-swipe-sp* _rrggbb|aa_
+	Set color of text on swiped special keys
+
+*--stroke* _rrggbb|aa_
+	Set color of the outline of keys
+
+*--stroke-sp* _rrggbb|aa_
+	Set color of the outline of special keys
+
+*--stroke-width* _pixels_
+	Width of the key outline in pixels.
+
+*--gap* _pixels_
+	Space around each key in pixels. Defaults to 2.
+
 *--version*
 	Print version information
 
 *-h*, *--help*
 	Print usage help 
 
+
+# INPUT METHOD
+
+With *--im*, the keyboard is the seat's input method (zwp_input_method_v2).
+Only one input method per seat is possible: when another one holds the seat, the
+keys are plain key events and the keyboard tries again later (and reports
+*osk im* to *--notify*).
+
+Private fields (purpose password or PIN, or the sensitive data or hidden text
+hint) send nothing to the predictor, and with *-o* print nothing on standard
+output. The strip shows a lock in them and no pen key.
+
+A word is learned when it is finished (a space, punctuation or Enter after it)
+or picked from the strip, once: finishing the same word at the same place again
+(after deleting the space after it) learns nothing more, until another key or a
+change the field makes by itself. Holding a word in the
+strip asks whether to remove it.
+
+# FILES
+
+_$XDG_CONFIG_HOME/glassine/predict.conf_ (or _~/.config/glassine/predict.conf_)
+	*suggestions = off* leaves the strip empty and sends nothing to the
+	predictor; *handwriting = off* hides the pen key (*off*, *false* or *0*;
+	anything else, or no line, is on). Read again at each field focus and
+	each show.
 
 # SIGNALS
 

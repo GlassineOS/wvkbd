@@ -65,6 +65,25 @@ static bool log_has(const char *s)
     return r;
 }
 
+/* the learn lines for word (its sixth field) in the log */
+static int log_learns(const char *word)
+{
+    FILE *f = fopen(logpath, "r");
+    if (!f) return 0;
+    char l[8192];
+    int n = 0;
+    while (fgets(l, sizeof l, f)) {
+        if (strncmp(l, "learn\t", 6)) continue;
+        char *p = l;
+        for (int i = 0; i < 5 && p; i++) if ((p = strchr(p, '\t'))) p++;
+        if (!p) continue;
+        size_t wl = strcspn(p, "\t\n");
+        if (wl == strlen(word) && !strncmp(p, word, wl)) n++;
+    }
+    fclose(f);
+    return n;
+}
+
 /* the loop for ms milliseconds */
 static void run(struct osk *o, int ms)
 {
@@ -479,6 +498,79 @@ static void test_osk(void)
     osk_finish(&o);
 }
 
+/* a word is learned once per finish: Backspace back into a learned word (the space
+ * after a pick or after a typed word deleted), then Enter or a space, learns nothing more */
+static void test_learn_once(void)
+{
+    struct strip_item it[STRIP_ITEMS];
+    int n, mid = -1;
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "");
+    type(&o, "I say hel", true, IM_P_NORMAL, 0);
+    run(&o, 200);
+    n = strip_items(&o.s, it);
+    for (int i = 0; i < n; i++) if (it[i].kind == SI_WORD && it[i].best) mid = i;
+    osk_strip_down(&o, it[mid].x + 5, 10, now_ms());
+    osk_strip_up(&o, now_ms());
+    report(&o, IM_P_NORMAL, 0);
+    CHECK_STR("learn once: picked", app, "I say hela ");
+    osk_backspace(&o, now_ms());
+    osk_backspace_up(&o);
+    report(&o, IM_P_NORMAL, 0);
+    CHECK_STR("learn once: the space deleted", app, "I say hela");
+    osk_key(&o, 28, now_ms());
+    run(&o, 100);
+    CHECK_INT("learn once: a picked word, Backspace, Enter: one learn", log_learns("hela"), 1);
+    snprintf(app, sizeof app, "I say hela\n");        /* the app took the Enter */
+    report(&o, IM_P_NORMAL, 0);
+    /* a typed word, its space deleted, a space again */
+    type(&o, "tea ", true, IM_P_NORMAL, 0);
+    osk_backspace(&o, now_ms());
+    osk_backspace_up(&o);
+    report(&o, IM_P_NORMAL, 0);
+    type(&o, " ", true, IM_P_NORMAL, 0);
+    run(&o, 100);
+    CHECK_INT("learn once: a typed word, Backspace, space: one learn", log_learns("tea"), 1);
+    /* the same word at another place is another use */
+    type(&o, "tea ", true, IM_P_NORMAL, 0);
+    run(&o, 100);
+    CHECK_INT("learn once: the word again further on: learned again", log_learns("tea"), 2);
+    /* the learned word changed: the new word is learned */
+    osk_backspace(&o, now_ms());
+    osk_backspace_up(&o);
+    report(&o, IM_P_NORMAL, 0);
+    type(&o, "s ", true, IM_P_NORMAL, 0);
+    run(&o, 100);
+    CHECK_INT("learn once: a changed word is learned", log_learns("teas"), 1);
+    /* the app empties the field (a sent message): the same word there again counts */
+    snprintf(app, sizeof app, "%s", "");
+    osk_im_cause(&o, IM_CAUSE_OTHER);
+    report(&o, IM_P_NORMAL, 0);
+    type(&o, "tea ", true, IM_P_NORMAL, 0);
+    snprintf(app, sizeof app, "%s", "");
+    osk_im_cause(&o, IM_CAUSE_OTHER);
+    report(&o, IM_P_NORMAL, 0);
+    type(&o, "tea ", true, IM_P_NORMAL, 0);
+    run(&o, 100);
+    CHECK_INT("learn once: the field emptied by the app, the word again: learned", log_learns("tea"), 4);
+    /* no surrounding text: Enter, then the same word: learned again (the place is unknown) */
+    unfocus(&o);
+    focus(&o, IM_P_NORMAL, 0, NULL);
+    type(&o, "tea", false, IM_P_NORMAL, 0);
+    osk_key(&o, 28, now_ms());
+    type(&o, "tea", false, IM_P_NORMAL, 0);
+    osk_key(&o, 28, now_ms());
+    run(&o, 100);
+    CHECK_INT("learn once: no surrounding text, Enter, the word again: learned", log_learns("tea"), 6);
+    /* another field: the mark is gone */
+    unfocus(&o);
+    focus(&o, IM_P_NORMAL, 0, "");
+    type(&o, "I say hela ", true, IM_P_NORMAL, 0);
+    run(&o, 100);
+    CHECK_INT("learn once: a new focus learns again", log_learns("hela"), 2);
+    osk_finish(&o);
+}
+
 /* predict.conf's keys for the keyboard: suggestions and handwriting (on when unset) */
 static char confdir[600], confpath[700];
 static void conf(const char *text)
@@ -546,6 +638,7 @@ int main(int argc, char **argv)
     test_im();
     test_strip();
     test_osk();
+    test_learn_once();
     test_settings();
     unlink(logpath);
     return T_DONE();
