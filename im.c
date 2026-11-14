@@ -21,6 +21,7 @@ static void view_clear(struct im_field *f)
     memset(f->before, 0, sizeof f->before);     /* nothing of a field stays in memory */
     f->len = 0;
     f->selection = false;
+    f->sel_start = 0;
     memset(f->old, 0, sizeof f->old);
     f->n_old = 0;
     f->late = false;
@@ -166,6 +167,9 @@ int imf_done(struct im_field *f, int64_t now)
             if (!same || sel != f->selection) r |= IM_VIEW;
             view_set(f, f->p.t, c);
             f->selection = sel;
+            size_t cut = c - f->len;                /* the view starts at report byte cut */
+            uint32_t a = f->p.anchor;
+            f->sel_start = !sel || a > c ? f->len : a > cut ? a - cut : 0;
         }
     } else if (!f->surrounding && f->p.cause == IM_CAUSE_OTHER && f->len) {
         view_clear(f);                              /* changed by other means: unknown now */
@@ -237,6 +241,7 @@ void imf_edit(struct im_field *f, size_t del, const char *text, int64_t now)
     view_set(f, buf, n + t);
     memset(buf, 0, n + t);
     f->selection = false;
+    f->sel_start = f->len;
     if (f->surrounding) {
         f->last_edit_ms = now;
     }
@@ -256,12 +261,18 @@ void imf_key_backspace(struct im_field *f)
 
 bool imf_late(const struct im_field *f, int64_t now)
 {
-    return f->late && f->n_old > 0 && now - f->last_edit_ms < IM_INFLIGHT_MS;
+    (void)now;
+    return f->late && f->n_old > 0;
 }
 
 void imf_asked(struct im_field *f)
 {
     f->late = false;
+}
+
+bool imf_unconfirmed(const struct im_field *f)
+{
+    return f->active && f->surrounding && f->n_old > 0;
 }
 
 bool imf_settled(const struct im_field *f)
