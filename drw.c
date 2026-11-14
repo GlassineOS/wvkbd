@@ -129,6 +129,14 @@ drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
               uint32_t w, uint32_t h, uint32_t b, const char *label,
               PangoFontDescription *font_description)
 {
+    drw_draw_text_ex(ds, color, x, y, w, h, b, label, font_description, false);
+}
+
+void
+drw_draw_text_ex(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                 uint32_t w, uint32_t h, uint32_t b, const char *label,
+                 PangoFontDescription *font_description, bool ellipsize)
+{
     drwsurf_flip(ds);
     struct drwbuf *d = ds->back_buffer;
     drwsurf_damage(ds, x, y, w, h);
@@ -144,15 +152,89 @@ drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
 
     pango_layout_set_text(d->layout, label, -1);
     pango_layout_set_width(d->layout, (w - (b * 2)) * PANGO_SCALE);
-    pango_layout_set_height(d->layout, (h - (b * 2)) * PANGO_SCALE);
+    pango_layout_set_height(d->layout, ellipsize ? -1 : (int)(h - (b * 2)) * PANGO_SCALE);
+    pango_layout_set_ellipsize(d->layout, ellipsize ? PANGO_ELLIPSIZE_END : PANGO_ELLIPSIZE_NONE);
+    if (ellipsize) pango_layout_set_alignment(d->layout, PANGO_ALIGN_CENTER);
 
     int width, height;
     pango_layout_get_pixel_size(d->layout, &width, &height);
 
-    cairo_rel_move_to(d->cairo, -width / 2, -height / 2);
+    if (ellipsize)              /* centred by the layout across its width */
+        cairo_rel_move_to(d->cairo, -(int)(w - b * 2) / 2, -height / 2);
+    else
+        cairo_rel_move_to(d->cairo, -width / 2, -height / 2);
 
     pango_cairo_show_layout(d->cairo, d->layout);
+    pango_layout_set_ellipsize(d->layout, PANGO_ELLIPSIZE_NONE);
+    pango_layout_set_alignment(d->layout, PANGO_ALIGN_LEFT);
     cairo_restore(d->cairo);
+}
+
+int
+drw_text_width(struct drwsurf *ds, const char *label, PangoFontDescription *font_description)
+{
+    struct drwbuf *d = ds->back_buffer;
+    int width, height;
+    pango_layout_set_font_description(d->layout, font_description);
+    pango_layout_set_width(d->layout, -1);
+    pango_layout_set_height(d->layout, -1);
+    pango_layout_set_text(d->layout, label, -1);
+    pango_layout_get_pixel_size(d->layout, &width, &height);
+    return width;
+}
+
+void
+drw_draw_icon(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+              uint32_t w, uint32_t h, enum drw_icon icon)
+{
+    drwsurf_flip(ds);
+    struct drwbuf *d = ds->back_buffer;
+    drwsurf_damage(ds, x, y, w, h);
+    cairo_t *c = d->cairo;
+    double s = (w < h ? w : h) * 0.42, cx = x + w / 2.0, cy = y + h / 2.0;
+    cairo_save(c);
+    cairo_set_source_rgba(c, color.bgra[2] / 255.0, color.bgra[1] / 255.0,
+                          color.bgra[0] / 255.0, color.bgra[3] / 255.0);
+    cairo_set_line_width(c, s > 16 ? 2 : 1.5);
+    cairo_set_line_join(c, CAIRO_LINE_JOIN_ROUND);
+    switch (icon) {
+    case DRW_ICON_PEN:          /* a pen, writing down to the left */
+        cairo_move_to(c, cx - s * 0.8, cy + s * 0.8);
+        cairo_line_to(c, cx - s * 0.6, cy + s * 0.2);
+        cairo_line_to(c, cx + s * 0.4, cy - s * 0.8);
+        cairo_line_to(c, cx + s * 0.8, cy - s * 0.4);
+        cairo_line_to(c, cx - s * 0.2, cy + s * 0.6);
+        cairo_close_path(c);
+        cairo_stroke(c);
+        cairo_move_to(c, cx + s * 0.2, cy - s * 0.6);
+        cairo_line_to(c, cx + s * 0.6, cy - s * 0.2);
+        cairo_stroke(c);
+        break;
+    case DRW_ICON_HIDE:         /* a keyboard over a chevron pointing down */
+        cairo_rectangle(c, cx - s, cy - s * 0.85, s * 2, s * 1.1);
+        cairo_stroke(c);
+        for (int r = 0; r < 2; r++)
+            for (int k = 0; k < 4; k++)
+                cairo_rectangle(c, cx - s * 0.7 + k * s * 0.4, cy - s * 0.6 + r * s * 0.35, s * 0.18, s * 0.15);
+        cairo_rectangle(c, cx - s * 0.45, cy + s * 0.05, s * 0.9, s * 0.1);
+        cairo_fill(c);
+        cairo_move_to(c, cx - s * 0.35, cy + s * 0.5);
+        cairo_line_to(c, cx, cy + s * 0.85);
+        cairo_line_to(c, cx + s * 0.35, cy + s * 0.5);
+        cairo_stroke(c);
+        break;
+    case DRW_ICON_LOCK:         /* a padlock */
+        cairo_rectangle(c, cx - s * 0.6, cy - s * 0.1, s * 1.2, s * 0.9);
+        cairo_fill(c);
+        cairo_new_sub_path(c);
+        cairo_arc(c, cx, cy - s * 0.35, s * 0.38, M_PI, 2 * M_PI);
+        cairo_line_to(c, cx + s * 0.38, cy - s * 0.1);
+        cairo_move_to(c, cx - s * 0.38, cy - s * 0.1);
+        cairo_line_to(c, cx - s * 0.38, cy - s * 0.35);
+        cairo_stroke(c);
+        break;
+    }
+    cairo_restore(c);
 }
 
 void
