@@ -12,3 +12,7 @@ gen $P/stable/xdg-shell/xdg-shell.xml xdg-shell
 gen /usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml wlr-virtual-pointer-unstable-v1
 cc -O1 -I$B -o $B/ti-client /t/ti-client.c $B/text-input-unstable-v3-protocol.c $B/xdg-shell-protocol.c -lwayland-client
 cc -O1 -I$B -o $B/vptr /t/vptr.c $B/wlr-virtual-pointer-unstable-v1-protocol.c -lwayland-client
+if [ -d /hw ]; then                   # the real recognizer (test.sh HW_SRC)
+    cp -r /hw $B/hw
+    make -s -C $B/hw OUT=$B all >/dev/null 2>&1 || echo "build.sh: glassine-handwriting failed to build"
+fi

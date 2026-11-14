@@ -4,6 +4,7 @@
 #include "proto/fractional-scale-v1-client-protocol.h"
 #include "proto/viewporter-client-protocol.h"
 #include "proto/input-method-unstable-v2-protocol.h"
+#include "proto/glassine-ink-v1-client-protocol.h"
 #include <errno.h>
 #include <linux/input-event-codes.h>
 #include <signal.h>
@@ -25,6 +26,7 @@
 
 #include "keyboard.h"
 #include "config.h"
+#include "paperdraw.h"
 
 /* lazy die macro */
 #define die(...)                                                               \
@@ -66,6 +68,23 @@ static char *predictor_cmd;             /* --predictor */
 static char *notify_path;               /* --notify: focus reports to the session */
 static char *hide_cmd, *pen_cmd;        /* --hide-cmd, --pen-cmd */
 static bool strip_touch;                /* the touch or press began in the strip */
+/* glassine: the writing paper (paper.h): the input method's popup at the field's cursor */
+static char *hw_cmd;                    /* --handwriting: the recognizer */
+static char *pen_flag;                  /* --pen-flag: the session's mark of a pen tap */
+static int paper_height = -1;           /* --paper-height (-1: the keys' height) */
+static struct glassine_ink_manager_v1 *ink_mgr;
+static struct wl_surface *paper_surf;
+static struct zwp_input_popup_surface_v2 *paper_popup;
+static struct glassine_ink_surface_v1 *paper_ink;
+static struct wp_viewport *paper_viewport;
+static struct drwbuf paper_buf_a, paper_buf_b;
+static struct drwsurf paper_ds;
+static int paper_drawn;                 /* points of the stroke being written drawn */
+static bool paper_writing, paper_ctl;   /* the pointer's press writes / hit a control */
+static struct wl_surface *ptr_surface;  /* the surface the pointer is on */
+static uint32_t paper_touches;          /* touch ids (< 32) that began on the paper */
+static void paper_show(void);
+static void paper_hide(void);
 static bool popup_xdg_surface_configured;
 static bool layer_surface_configured;
 
@@ -274,6 +293,12 @@ wl_touch_down(void *data, struct wl_touch *wl_touch, uint32_t serial,
               uint32_t time, struct wl_surface *surface, int32_t id,
               wl_fixed_t x, wl_fixed_t y)
 {
+    if (paper_surf && surface == paper_surf) {         /* glassine: a finger on the paper: its controls */
+        if (id >= 0 && id < 32) paper_touches |= 1u << id;
+        if (keyboard.debug) fprintf(stderr, "Paper: touch %d,%d\n", wl_fixed_to_int(x), wl_fixed_to_int(y));
+        osk_paper_tap(&osk, wl_fixed_to_int(x), wl_fixed_to_int(y), monotime());
+        return;
+    }
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
         return;
     }
@@ -302,6 +327,10 @@ void
 wl_touch_up(void *data, struct wl_touch *wl_touch, uint32_t serial,
             uint32_t time, int32_t id)
 {
+    if (id >= 0 && id < 32 && (paper_touches & (1u << id))) {
+        paper_touches &= ~(1u << id);
+        return;
+    }
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
         return;
     }
@@ -318,6 +347,7 @@ void
 wl_touch_motion(void *data, struct wl_touch *wl_touch, uint32_t time,
                 int32_t id, wl_fixed_t x, wl_fixed_t y)
 {
+    if (id >= 0 && id < 32 && (paper_touches & (1u << id))) return;
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
         return;
     }
@@ -364,6 +394,8 @@ wl_pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
     /* glassine: a press right after entering (a pen or pointer that jumps there) */
     cur_x = wl_fixed_to_int(surface_x);
     cur_y = wl_fixed_to_int(surface_y);
+    ptr_surface = surface;
+    if (keyboard.debug && surface == paper_surf) fprintf(stderr, "Paper: pointer in %d,%d\n", cur_x, cur_y);
 }
 
 void
@@ -371,12 +403,29 @@ wl_pointer_leave(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                  struct wl_surface *surface)
 {
     cur_x = cur_y = -1;
+    if (ptr_surface && ptr_surface == paper_surf && paper_writing) {     /* the pen left the paper */
+        paper_writing = false;
+        osk_pen_up(&osk, monotime());
+    }
+    if (keyboard.debug && ptr_surface && ptr_surface == paper_surf) fprintf(stderr, "Paper: pointer out\n");
+    ptr_surface = NULL;
 }
 
 void
 wl_pointer_motion(void *data, struct wl_pointer *wl_pointer, uint32_t time,
                   wl_fixed_t surface_x, wl_fixed_t surface_y)
 {
+    /* glassine: the pen writing on the paper (sway hands a pen to a client without tablet
+     * support as the pointer; a finger comes as touch and never writes) */
+    if (paper_surf && ptr_surface == paper_surf) {
+        cur_x = wl_fixed_to_int(surface_x);
+        cur_y = wl_fixed_to_int(surface_y);
+        if (paper_writing) {
+            osk_pen_motion(&osk, wl_fixed_to_double(surface_x), wl_fixed_to_double(surface_y), -1, time);
+            paper_draw_new_ink(&keyboard, &paper_ds, &paper_drawn);
+        }
+        return;
+    }
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
         return;
     }
@@ -395,6 +444,28 @@ void
 wl_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                   uint32_t time, uint32_t button, uint32_t state)
 {
+    if (paper_surf && ptr_surface == paper_surf) {     /* glassine: the paper */
+        bool down = state == WL_POINTER_BUTTON_STATE_PRESSED;
+        if (down && !paper_writing && !paper_ctl) {
+            if (osk_paper_tap(&osk, cur_x, cur_y, monotime())) {
+                paper_ctl = true;
+            } else {
+                if (keyboard.debug) fprintf(stderr, "Paper: pen down %d,%d\n", cur_x, cur_y);
+                paper_writing = true;
+                paper_drawn = 0;
+                osk_pen_down(&osk, cur_x, cur_y, -1, time, monotime());
+                paper_draw_new_ink(&keyboard, &paper_ds, &paper_drawn);
+            }
+        } else if (!down) {
+            if (paper_writing) {
+                paper_writing = false;
+                osk_pen_up(&osk, monotime());
+                if (keyboard.debug) fprintf(stderr, "Paper: pen up (%d strokes)\n", osk.pp.ns);
+            }
+            paper_ctl = false;
+        }
+        return;
+    }
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
         return;
     }
@@ -512,6 +583,8 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
             registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
     } else if ((im_auto || im_mode) && strcmp(interface, zwp_input_method_manager_v2_interface.name) == 0) {
         im_mgr = wl_registry_bind(registry, name, &zwp_input_method_manager_v2_interface, 1);
+    } else if (hw_cmd && strcmp(interface, glassine_ink_manager_v1_interface.name) == 0) {
+        ink_mgr = wl_registry_bind(registry, name, &glassine_ink_manager_v1_interface, version < 2 ? version : 2);
     }
 }
 
@@ -609,6 +682,8 @@ void
 im_unavailable(void *data, struct zwp_input_method_v2 *zwp_input_method_v2)
 {
     fprintf(stderr, "input method: the seat has another one, plain keys (again in %d ms)\n", im_retry_ms);
+    osk_paper_end(&osk, monotime());    /* its popup goes with it */
+    paper_hide();
     zwp_input_method_v2_destroy(zwp_input_method_v2);
     if (zwp_input_method_v2 == input_method) input_method = NULL;
     osk_im_deactivate(&osk);
@@ -723,6 +798,61 @@ op_focus(void *d, int state, uint32_t purpose)
     else if (im_auto && state == 0) hide();
 }
 
+/* the paper's edits: the pending text is the preedit; one commit for all of it */
+static void
+op_im_preedit(void *d, uint32_t del, const char *text, const char *pre)
+{
+    if (!input_method) return;
+    if (del) zwp_input_method_v2_delete_surrounding_text(input_method, del, 0);
+    if (text && *text) zwp_input_method_v2_commit_string(input_method, text);
+    size_t n = pre ? strlen(pre) : 0;
+    zwp_input_method_v2_set_preedit_string(input_method, pre ? pre : "", (int32_t)n, (int32_t)n);
+    zwp_input_method_v2_commit(input_method, osk_serial(&osk));
+    if (keyboard.debug) fprintf(stderr, "paper: commit \"%s\" del %u preedit \"%s\"\n", text ? text : "", del, pre ? pre : "");
+}
+
+static void
+op_backspaces(void *d, int n)
+{
+    uint32_t t = (uint32_t)(monotime() + keyboard.last_press_offset);
+    for (int i = 0; i < n && i < 256; i++) {
+        zwp_virtual_keyboard_v1_key(keyboard.vkbd, t, KEY_BACKSPACE, WL_KEYBOARD_KEY_STATE_PRESSED);
+        zwp_virtual_keyboard_v1_key(keyboard.vkbd, t, KEY_BACKSPACE, WL_KEYBOARD_KEY_STATE_RELEASED);
+    }
+}
+
+static void keys_hide(void);
+
+static void
+op_view(void *d, enum osk_view v)
+{
+    if (keyboard.debug) fprintf(stderr, "view %d\n", (int)v);
+    switch (v) {
+    case OSK_VIEW_KEYS:
+        paper_hide();
+        show();
+        break;
+    case OSK_VIEW_PAPER:
+        keys_hide();
+        paper_show();
+        break;
+    case OSK_VIEW_PAPER_KEYS:
+        paper_show();
+        show();
+        break;
+    case OSK_VIEW_HIDDEN:
+        paper_hide();
+        op_hide(d);         /* as the hide key: the session's state follows */
+        break;
+    }
+}
+
+static void
+op_paper_changed(void *d)
+{
+    if (paper_surf && paper_ds.attached) paper_draw_all(&keyboard, &paper_ds);
+}
+
 static const struct osk_ops osk_ops = {
     .im_send = op_im_send,
     .strip_changed = op_strip_changed,
@@ -731,7 +861,93 @@ static const struct osk_ops osk_ops = {
     .hide = op_hide,
     .handwriting = op_handwriting,
     .focus = op_focus,
+    .im_preedit = op_im_preedit,
+    .backspaces = op_backspaces,
+    .view = op_view,
+    .paper_changed = op_paper_changed,
 };
+
+/* ---- glassine: the paper's surface ---- */
+static void
+paper_rect(void *data, struct zwp_input_popup_surface_v2 *p, int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    if (keyboard.debug) fprintf(stderr, "Paper: the cursor at %d,%d %dx%d of it\n", x, y, w, h);
+}
+
+static const struct zwp_input_popup_surface_v2_listener paper_popup_listener = {
+    .text_input_rectangle = paper_rect,
+};
+
+static void
+paper_show(void)
+{
+    if (paper_surf || !input_method) return;
+    if (!available_width) refresh_available_dimension();
+    uint32_t w = keyboard.w ? keyboard.w : available_width;
+    uint32_t h = paper_height > 0 ? (uint32_t)paper_height : normal_height;
+    if (!w || !h) return;
+    double scale = keyboard.scale > 0 ? keyboard.scale : 1;
+    paper_surf = wl_compositor_create_surface(compositor);
+    paper_popup = zwp_input_method_v2_get_input_popup_surface(input_method, paper_surf);
+    zwp_input_popup_surface_v2_add_listener(paper_popup, &paper_popup_listener, NULL);
+    paper_ds.ctx = &draw_ctx;
+    paper_ds.back_buffer = &paper_buf_a;
+    paper_ds.display_buffer = &paper_buf_b;
+    paper_ds.surf = paper_surf;
+    osk_paper_size(&osk, (int)w, (int)h);
+    if (viewporter) {
+        paper_viewport = wp_viewporter_get_viewport(viewporter, paper_surf);
+        wp_viewport_set_destination(paper_viewport, w, h);
+    } else {
+        scale = (int)scale;
+        wl_surface_set_buffer_scale(paper_surf, (int)scale);
+    }
+    drwsurf_resize(&paper_ds, w, h, scale);
+    if (ink_mgr) {
+        /* the pen draws at once on the writing area (not the row and the controls) */
+        paper_ink = glassine_ink_manager_v1_get_ink_surface(ink_mgr, paper_surf);
+        struct wl_region *r = wl_compositor_create_region(compositor);
+        int top = osk.pp.ctl + osk.pp.ctl / 2;
+        wl_region_add(r, 0, top, (int32_t)w, (int32_t)h - top);
+        glassine_ink_surface_v1_set_areas(paper_ink, r);
+        wl_region_destroy(r);
+        if (glassine_ink_surface_v1_get_version(paper_ink) >= 2) {
+            double iw = paper_ink_width(&osk.pp);
+            glassine_ink_surface_v1_set_brush(paper_ink, GLASSINE_INK_SURFACE_V1_TOOL_TIP, GLASSINE_INK_SURFACE_V1_KIND_PEN,
+                                              wl_fixed_from_double(iw), wl_fixed_from_double(iw * 1.4), wl_fixed_from_double(1));
+            glassine_ink_surface_v1_set_brush(paper_ink, GLASSINE_INK_SURFACE_V1_TOOL_ERASER, GLASSINE_INK_SURFACE_V1_KIND_NONE,
+                                              wl_fixed_from_double(1), wl_fixed_from_double(1), wl_fixed_from_double(1));
+        }
+    }
+    paper_draw_all(&keyboard, &paper_ds);
+    drwsurf_attach(&paper_ds);
+    paper_writing = paper_ctl = false;
+    if (keyboard.debug) fprintf(stderr, "Paper %ux%u\n", w, h);
+}
+
+static void
+paper_hide(void)
+{
+    if (!paper_surf) return;
+    if (paper_ds.frame_cb) {
+        wl_callback_destroy(paper_ds.frame_cb);
+        paper_ds.frame_cb = NULL;
+    }
+    if (paper_ink) glassine_ink_surface_v1_destroy(paper_ink);
+    paper_ink = NULL;
+    if (paper_viewport) wp_viewport_destroy(paper_viewport);
+    paper_viewport = NULL;
+    zwp_input_popup_surface_v2_destroy(paper_popup);
+    paper_popup = NULL;
+    wl_surface_destroy(paper_surf);
+    if (ptr_surface == paper_surf) ptr_surface = NULL;
+    paper_surf = NULL;
+    paper_ds.surf = NULL;
+    paper_ds.attached = false;
+    paper_writing = paper_ctl = false;
+    paper_touches = 0;
+    if (keyboard.debug) fprintf(stderr, "Paper hidden\n");
+}
 
 void
 redimension_keyboard()
@@ -783,7 +999,7 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
     // Not what we expected, or redimension, refresh and restart
     if (keyboard.w != w || keyboard.h != h) {
         zwlr_layer_surface_v1_ack_configure(surface, serial);
-        hide();
+        keys_hide();
         show();
         return;
     };
@@ -914,6 +1130,9 @@ usage(char *argv0)
     fprintf(stderr, "  --notify [socket]        - glassine: focus reports to the session (datagrams)\n");
     fprintf(stderr, "  --hide-cmd [cmd]         - glassine: the strip's hide key runs this (default: hide)\n");
     fprintf(stderr, "  --pen-cmd [cmd]          - glassine: the pen key (handwriting) runs this; no pen key without it\n");
+    fprintf(stderr, "  --handwriting [cmd]      - glassine: the recognizer (docs/recognizer.md of GlassineOS/handwriting): the pen key opens the writing paper\n");
+    fprintf(stderr, "  --pen-flag [file]        - glassine: the session made this file before a show: a pen tap (the paper in an empty field)\n");
+    fprintf(stderr, "  --paper-height [px]      - glassine: the writing paper's height (default: the keys')\n");
     fprintf(stderr, "  --non-exclusive    - Allow the keyboard to overlap "
                     "windows. Do not request an exclusive zone from the "
                     "compositor\n");
@@ -932,8 +1151,19 @@ list_layers()
     }
 }
 
+/* the session's hide (SIGUSR1, the hide key): the paper goes too */
 void
 hide()
+{
+    if (keyboard.osk) osk_paper_end(keyboard.osk, monotime());
+    paper_hide();
+    keys_hide();
+    hidden = true;
+}
+
+/* the keys go (the paper may stay) */
+static void
+keys_hide(void)
 {
     if (!layer_surface) {
         return;
@@ -1040,10 +1270,27 @@ show()
     }
 }
 
+/* glassine: the session's show; after a pen tap (--pen-flag, its mark) the paper when the
+ * field is empty and handwriting is offered, else the keys (a finger tap) */
+static void
+session_show(void)
+{
+    bool pen = pen_flag && unlink(pen_flag) == 0;
+    if (keyboard.osk && pen && osk_show_pen(keyboard.osk, monotime())) {
+        hidden = false;
+        return;
+    }
+    if (keyboard.osk && osk.paper_up) {
+        osk_paper_end(keyboard.osk, monotime());
+        paper_hide();
+    }
+    show();
+}
+
 void
 toggle_visibility()
 {
-    if (hidden)
+    if (hidden && !paper_surf)
         show();
     else
         hide();
@@ -1342,7 +1589,9 @@ main(int argc, char **argv)
             strip_on = true;
         } else if (!strcmp(argv[i], "--strip-height") || !strcmp(argv[i], "--predictor") ||
                    !strcmp(argv[i], "--lang") || !strcmp(argv[i], "--notify") ||
-                   !strcmp(argv[i], "--hide-cmd") || !strcmp(argv[i], "--pen-cmd")) {
+                   !strcmp(argv[i], "--hide-cmd") || !strcmp(argv[i], "--pen-cmd") ||
+                   !strcmp(argv[i], "--handwriting") || !strcmp(argv[i], "--pen-flag") ||
+                   !strcmp(argv[i], "--paper-height")) {
             if (i >= argc - 1) {
                 usage(argv[0]);
                 exit(1);
@@ -1353,6 +1602,9 @@ main(int argc, char **argv)
             else if (!strcmp(o, "--lang")) keyboard.lang_override = estrdup(argv[i]);
             else if (!strcmp(o, "--notify")) notify_path = estrdup(argv[i]);
             else if (!strcmp(o, "--hide-cmd")) hide_cmd = estrdup(argv[i]);
+            else if (!strcmp(o, "--handwriting")) hw_cmd = estrdup(argv[i]);
+            else if (!strcmp(o, "--pen-flag")) pen_flag = estrdup(argv[i]);
+            else if (!strcmp(o, "--paper-height")) paper_height = atoi(argv[i]);
             else pen_cmd = estrdup(argv[i]);
         } else if ((!strcmp(argv[i], "-wayland-layer")) ||
                    (!strcmp(argv[i], "--wayland-layer"))) {
@@ -1508,6 +1760,13 @@ main(int argc, char **argv)
         for (char *t = strtok(predictor_cmd, " "); t && n < 15; t = strtok(NULL, " ")) pargv[n++] = t;
     }
     osk_init(&osk, &osk_ops, NULL, pargv[0] ? pargv : NULL, strip_on && im_mode, pen_cmd != NULL);
+    static char *hargv[16];
+    if (hw_cmd && im_mode) {            /* words split at spaces, no shell */
+        int n = 0;
+        for (char *t = strtok(hw_cmd, " "); t && n < 15; t = strtok(NULL, " ")) hargv[n++] = t;
+        osk_handwriting(&osk, hargv[0] ? hargv : NULL);
+    }
+    if (pen_flag) unlink(pen_flag);     /* a mark from before this run counts nothing */
     if (im_mode) keyboard.osk = &osk;
     if (!im_mode) osk.strip_on = false;
     im_bind();
@@ -1545,7 +1804,7 @@ main(int argc, char **argv)
     if (!hidden)
         show();
 
-    struct pollfd fds[5];
+    struct pollfd fds[6];
     int WAYLAND_FD = 0;
     int SIGNAL_FD = 1;
     int HOLD_FD = 2;    /* glassine: long press */
@@ -1618,7 +1877,7 @@ main(int argc, char **argv)
             else if (si.ssi_signo == SIGUSR1)
                 hide();
             else if (si.ssi_signo == SIGUSR2)
-                show();
+                session_show();
             else if (si.ssi_signo == SIGRTMIN)
                 toggle_visibility();
             else if (si.ssi_signo == SIGPIPE)

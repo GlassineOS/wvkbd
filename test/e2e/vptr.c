@@ -2,6 +2,8 @@
  * capability while it runs and reads commands from a FIFO, one per line, in layout px of
  * the output (W x H from argv):
  *   tap X Y | hold X Y MS | down X Y | up
+ *   stroke X,Y X,Y ...   pressed from the first point to the last (a pen writing; sway
+ *                        hands a pen to a client without tablet support as this pointer)
  * vptr FIFO W H */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -61,13 +63,25 @@ int main(int argc, char **argv)
     for (;;) {
         FILE *f = fopen(argv[1], "r");
         if (!f) return 1;
-        char l[128];
+        static char l[65536];
         int x, y, t;
         while (fgets(l, sizeof l, f)) {
             if (sscanf(l, "tap %d %d", &x, &y) == 2) { move(x, y); btn(1); usleep(60000); btn(0); }
             else if (sscanf(l, "hold %d %d %d", &x, &y, &t) == 3) { move(x, y); btn(1); usleep(t * 1000); btn(0); }
             else if (sscanf(l, "down %d %d", &x, &y) == 2) { move(x, y); btn(1); }
             else if (!strncmp(l, "up", 2)) btn(0);
+            else if (!strncmp(l, "stroke ", 7)) {
+                char *p = l + 7;
+                int first = 1;
+                double px, py;
+                for (int k = 0; sscanf(p, " %lf,%lf%n", &px, &py, &k) == 2; ) {
+                    p += k;
+                    move((int)(px + 0.5), (int)(py + 0.5));
+                    if (first) { btn(1); first = 0; }
+                    usleep(4000);
+                }
+                if (!first) btn(0);
+            }
         }
         fclose(f);
     }

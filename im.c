@@ -20,6 +20,7 @@ static void view_clear(struct im_field *f)
 {
     memset(f->before, 0, sizeof f->before);     /* nothing of a field stays in memory */
     f->len = 0;
+    f->after = 0;
     f->inflight = 0;
     f->selection = false;
 }
@@ -127,6 +128,7 @@ int imf_done(struct im_field *f, int64_t now)
             bool sel = f->p.anchor != f->p.cursor;
             if (c != f->len || memcmp(f->before, f->p.t, c) || sel != f->selection) r |= IM_VIEW;
             view_set(f, f->p.t, c);
+            f->after = strlen(f->p.t) - c;
             f->selection = sel;
         }
     } else if (!f->surrounding && f->p.cause == IM_CAUSE_OTHER && f->len) {
@@ -233,4 +235,9 @@ size_t imf_backspace_bytes(const struct im_field *f)
 {
     if (!f->active || imf_private(f) || !f->surrounding || f->selection || !f->len) return 0;
     return f->len - tr_prev(f->before, f->len);
+}
+
+bool imf_empty(const struct im_field *f)
+{
+    return f->active && f->len == 0 && f->after == 0;
 }

@@ -673,6 +673,10 @@ kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time)
             kbd_press_im(kb, k, time);
             break;
         }
+        if (kb->osk && osk_key_capture(kb->osk, k->code, monotime())) {
+            kbd_press_im(kb, k, time);  /* glassine: correcting a reading: Enter uses it */
+            break;
+        }
         if (kb->osk && k->code != KEY_BACKSPACE) osk_key(kb->osk, k->code, monotime());
         if (k->code_mod) {
             zwp_virtual_keyboard_v1_key_mods(kb->vkbd, time, k->code_mod, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -1321,4 +1325,174 @@ kbd_draw_strip(struct kbd *kb)
         }
         }
     }
+}
+
+/* ---- glassine: the writing paper (paper.h, the shell.write boards of GlassineOS/ui).
+ * The look comes from the keyboard's theme: the paper is the key face colour, partly
+ * see-through; its edge, the chips and the type are the keys' outline, faces and fonts.
+ * Ink is drawn as it is written, only the new segment's rectangle each time. */
+#define PAPER_ALPHA 0xc2        /* the sheet: about three quarters opaque */
+
+static void rgba(cairo_t *c, Color k, double alpha)
+{
+    cairo_set_source_rgba(c, k.bgra[2] / 255.0, k.bgra[1] / 255.0, k.bgra[0] / 255.0, k.bgra[3] / 255.0 * alpha);
+}
+
+static void rounded(cairo_t *c, double x, double y, double w, double h, double r)
+{
+    if (r <= 0) { cairo_rectangle(c, x, y, w, h); return; }
+    cairo_new_sub_path(c);
+    cairo_arc(c, x + w - r, y + r, r, -M_PI / 2, 0);
+    cairo_arc(c, x + w - r, y + h - r, r, 0, M_PI / 2);
+    cairo_arc(c, x + r, y + h - r, r, M_PI / 2, M_PI);
+    cairo_arc(c, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+    cairo_close_path(c);
+}
+
+double paper_ink_width(const struct paper *p)
+{
+    double w = p->h / 110.0;
+    return w < 2 ? 2 : w;
+}
+
+static void stroke_path(cairo_t *c, const struct paper_stroke *s, int from)
+{
+    if (!s->n) return;
+    if (from < 0) from = 0;
+    cairo_move_to(c, s->pt[from].x, s->pt[from].y);
+    if (s->n == 1) cairo_line_to(c, s->pt[0].x + 0.1, s->pt[0].y);   /* a dot */
+    for (int i = from + 1; i < s->n; i++) cairo_line_to(c, s->pt[i].x, s->pt[i].y);
+}
+
+void paper_draw_all(struct kbd *kb, struct drwsurf *ds)
+{
+    struct osk *o = kb->osk;
+    if (!o || !ds->back_buffer || !ds->back_buffer->cairo) return;
+    struct paper *p = &o->pp;
+    struct clr_scheme *sc = &kb->schemes[0], *sp = &kb->schemes[1];
+    drwsurf_flip(ds);
+    drwsurf_damage(ds, 0, 0, p->w, p->h);
+    cairo_t *c = ds->back_buffer->cairo;
+    cairo_save(c);
+    cairo_set_operator(c, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(c, 0, 0, 0, 0);
+    cairo_paint(c);
+    cairo_set_operator(c, CAIRO_OPERATOR_OVER);
+    double r = sc->rounding > 0 ? sc->rounding * 2 : 0, ew = kbd_stroke_width > 0 ? kbd_stroke_width : 1;
+    /* the sheet and its thin edge */
+    Color paper = sc->fg;
+    paper.bgra[3] = PAPER_ALPHA;
+    rounded(c, ew / 2, ew / 2, p->w - ew, p->h - ew, r);
+    rgba(c, paper, 1);
+    cairo_fill_preserve(c);
+    rgba(c, sc->stroke.bgra[3] ? sc->stroke : sc->text, 0.6);
+    cairo_set_line_width(c, ew);
+    cairo_stroke(c);
+    /* one guide line to write on */
+    double gy = paper_guide_y(p) + 0.5, dash = p->ctl / 8.0;
+    cairo_set_dash(c, &dash, 1, 0);
+    cairo_move_to(c, p->ctl * 0.75, gy);
+    cairo_line_to(c, p->w - p->ctl * 0.75, gy);
+    rgba(c, sc->text, 0.35);
+    cairo_set_line_width(c, 1.5);
+    cairo_stroke(c);
+    cairo_set_dash(c, NULL, 0, 0);
+    /* the ink; the ink that was read dims */
+    cairo_set_line_width(c, paper_ink_width(p));
+    cairo_set_line_cap(c, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(c, CAIRO_LINE_JOIN_ROUND);
+    for (int i = 0; i < p->ns; i++) {
+        stroke_path(c, &p->s[i], 0);
+        rgba(c, sc->text, p->pending && i < p->pending_n ? 0.35 : 1);
+        cairo_stroke(c);
+    }
+    cairo_restore(c);
+    /* the row and the controls */
+    struct paper_item it[PAPER_ITEMS];
+    int n = paper_items(p, it);
+    for (int i = 0; i < n; i++) {
+        struct paper_item *t = &it[i];
+        switch (t->kind) {
+        case PI_CHIP: {
+            bool best = t->cand == 0;
+            cairo_save(c);
+            rounded(c, t->x + 0.5, t->y + 0.5, t->w - 1, t->h - 1, sc->rounding > 0 ? sc->rounding + 2 : 0);
+            rgba(c, best ? sp->fg : sc->fg, 1);
+            cairo_fill_preserve(c);
+            rgba(c, sc->stroke.bgra[3] ? sc->stroke : sc->text, 1);
+            cairo_set_line_width(c, best ? 2 : 1);
+            cairo_stroke(c);
+            cairo_restore(c);
+            if (t->cand >= 0 && t->cand < p->ncand)
+                drw_draw_text_ex(ds, sc->text, t->x, t->y, t->w, t->h, 6, p->cand[t->cand],
+                                 best ? sc->best_font : sc->word_font, true);
+            break;
+        }
+        case PI_FIX:
+            drw_draw_icon(ds, sc->text, t->x, t->y, t->w, t->h, DRW_ICON_PEN);
+            break;
+        case PI_KEYS:
+            drw_draw_icon(ds, sc->text, t->x, t->y, t->w, t->h, DRW_ICON_KEYS);
+            break;
+        case PI_CLOSE:
+            drw_draw_icon(ds, sc->text, t->x, t->y, t->w, t->h, DRW_ICON_CLOSE);
+            break;
+        case PI_EDIT: {
+            cairo_save(c);
+            rounded(c, t->x + 0.5, t->y + 0.5, t->w - 1, t->h - 1, sc->rounding > 0 ? sc->rounding + 2 : 0);
+            rgba(c, sc->fg, 1);
+            cairo_fill_preserve(c);
+            rgba(c, sc->text, 1);
+            cairo_set_line_width(c, 1.5);
+            cairo_stroke(c);
+            cairo_restore(c);
+            char shown[PAPER_TEXT_MAX + 4];
+            snprintf(shown, sizeof shown, "%s|", p->fix);       /* the cursor at its end */
+            int tw = drw_text_width(ds, shown, sc->word_font), room = t->w - 16;
+            drw_draw_text_ex(ds, sc->text, t->x + 8, t->y, (tw < room ? tw : room) + 2, t->h, 0, shown,
+                             sc->word_font, true);
+            break;
+        }
+        case PI_USE:
+            cairo_save(c);
+            rounded(c, t->x + 0.5, t->y + 0.5, t->w - 1, t->h - 1, sc->rounding > 0 ? sc->rounding + 2 : 0);
+            rgba(c, sc->high, 1);
+            cairo_fill(c);
+            cairo_restore(c);
+            drw_draw_text_ex(ds, sc->text_press, t->x, t->y, t->w, t->h, 4, "Use", sc->best_font, true);
+            break;
+        case PI_NOTE:
+            drw_draw_text_ex(ds, sc->text, t->x, t->y, t->w, t->h, 0, p->note, sc->note_font, true);
+            break;
+        }
+    }
+}
+
+void paper_draw_new_ink(struct kbd *kb, struct drwsurf *ds, int *drawn)
+{
+    struct osk *o = kb->osk;
+    if (!o || !ds->back_buffer || !ds->back_buffer->cairo || !o->pp.ns) return;
+    struct paper *p = &o->pp;
+    struct paper_stroke *s = &p->s[p->ns - 1];
+    int from = *drawn > 0 ? *drawn - 1 : 0;
+    if (s->n <= from || (s->n > 1 && s->n - 1 <= from)) return;
+    double lw = paper_ink_width(p), x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (int i = from; i < s->n; i++) {
+        x0 = fmin(x0, s->pt[i].x); y0 = fmin(y0, s->pt[i].y);
+        x1 = fmax(x1, s->pt[i].x); y1 = fmax(y1, s->pt[i].y);
+    }
+    drwsurf_flip(ds);
+    int m = (int)lw + 2;
+    int bx = (int)x0 - m, by = (int)y0 - m;
+    drwsurf_damage(ds, bx < 0 ? 0 : bx, by < 0 ? 0 : by, (int)(x1 - x0) + 2 * m + 1, (int)(y1 - y0) + 2 * m + 1);
+    cairo_t *c = ds->back_buffer->cairo;
+    cairo_save(c);
+    cairo_set_line_width(c, lw);
+    cairo_set_line_cap(c, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(c, CAIRO_LINE_JOIN_ROUND);
+    stroke_path(c, s, from);
+    rgba(c, kb->schemes[0].text, 1);
+    cairo_stroke(c);
+    cairo_restore(c);
+    *drawn = s->n;
 }
