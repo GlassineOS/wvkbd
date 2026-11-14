@@ -50,6 +50,7 @@ struct im_field {
     uint32_t purpose, hints;
     bool surrounding;           /* the app reports surrounding text */
     bool selection;             /* text is selected (anchor != cursor) */
+    size_t sel_start;           /* where it starts in the view (len: at the cursor or after) */
     char before[IM_VIEW_MAX + 1];
     size_t len;
     /* the texts before the cursor the field had during own edits on their way (a hash
@@ -93,13 +94,16 @@ void imf_lost(struct im_field *f);
 /* Backspace sent as a key event: a view of its own typing loses its last character */
 void imf_key_backspace(struct im_field *f);
 
-/* the last report was late and own edits are still on their way: the caller sends an
- * empty commit (spaced, see osk.c), which makes the app report its newest text; then
- * imf_asked */
+/* the last report was late (own edits still on their way): the caller sends an empty
+ * commit (spaced, see osk.c), which makes the app report its newest text; then
+ * imf_asked. A report after IM_INFLIGHT_MS is taken as it is, so an edit the app refused
+ * doesn't keep the view wrong */
 bool imf_late(const struct im_field *f, int64_t now_ms);
 void imf_asked(struct im_field *f);
 /* the app's last report matched the view: no own edit on its way, no selection */
 bool imf_settled(const struct im_field *f);
+/* the app reports its text and own edits are on their way (unconfirmed) */
+bool imf_unconfirmed(const struct im_field *f);
 
 /* the view */
 const char *imf_before(const struct im_field *f, size_t *len);

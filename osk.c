@@ -11,6 +11,8 @@
 
 static void refresh(struct osk *o, int64_t now);
 static void pick_second(struct osk *o, int64_t now);
+static void release(struct osk *o, int64_t now, bool force);
+static void pick(struct osk *o, const char *word, const char *lang, int64_t now);
 
 static void got_words(void *d, const struct pc_words *w)
 {
@@ -230,6 +232,10 @@ void osk_im_done(struct osk *o, int64_t now)
         o->sync_at = 0;
         o->pick_until = 0;
         memset(o->pick_text, 0, sizeof o->pick_text);
+        memset(o->pick_tail, 0, sizeof o->pick_tail);
+        memset(o->queue, 0, sizeof o->queue);   /* nothing typed stays in memory */
+        o->queued = 0;
+        o->queue_until = 0;
         pc_forget(&o->pc);
     }
     if (r & IM_FOCUS_OFF) {
@@ -245,6 +251,7 @@ void osk_im_done(struct osk *o, int64_t now)
     if ((r & IM_TYPE) && o->f.active && o->ops->keys) o->ops->keys(o->d, keys_for(&o->f));
     if (r) after_edit(o, now);
     if (o->pick_until && imf_settled(&o->f)) pick_second(o, now);
+    if (o->queued) release(o, now, false);
 }
 
 void osk_visible(struct osk *o, bool on, int64_t now)
@@ -272,15 +279,71 @@ void osk_languages(struct osk *o, const char *langs, int64_t now)
     ask_words(o, now, false);
 }
 
-bool osk_text(struct osk *o, const char *text, int64_t now)
+static void text_now(struct osk *o, const char *text, int64_t now)
 {
-    if (!o->f.active || !text || !*text) return false;
     uint32_t c;
     tr_dec(text, strlen(text), &c);
     if (tr_separator(c)) finish_word(o, now);
     if (o->ops->im_send) o->ops->im_send(o->d, 0, text);
     imf_edit(&o->f, 0, text, now);
     after_edit(o, now);
+}
+
+/* one character deleted through the input method (none: nothing to delete) */
+static void backspace_now(struct osk *o, int64_t now)
+{
+    size_t n = imf_backspace_bytes(&o->f);
+    if (!n) return;
+    if (o->ops->im_send) o->ops->im_send(o->d, (uint32_t)n, "");
+    imf_edit(&o->f, n, "", now);
+    after_edit(o, now);
+}
+
+/* Holding edits back. Some apps resolve a delete against the text they last reported
+ * and drop it when that is older than the field (they report one edit behind). So a
+ * delete (Backspace, a pick that replaces something) waits while own edits are on their
+ * way, until the app's report confirms them (the empty commits of osk_tick ask for it) or
+ * OSK_QUEUE_WAIT_MS passed; edits after a held one wait behind it, in order. */
+static void hold(struct osk *o, int kind, const char *text, const char *lang, int64_t now)
+{
+    if (o->queued == OSK_QUEUE_MAX) release(o, now, true);
+    struct osk_op *op = &o->queue[o->queued++];
+    op->kind = kind;
+    snprintf(op->text, sizeof op->text, "%s", text ? text : "");
+    snprintf(op->lang, sizeof op->lang, "%s", lang ? lang : "");
+    if (!o->queue_until) o->queue_until = now + OSK_QUEUE_WAIT_MS;
+    if (!o->sync_at) o->sync_at = now + OSK_SYNC_MS;
+}
+
+/* the held edits that can go now, in order: text always, a delete once the field is
+ * confirmed (or, force, the first one in any case) */
+static void release(struct osk *o, int64_t now, bool force)
+{
+    int i = 0;
+    for (; i < o->queued; i++) {
+        struct osk_op *op = &o->queue[i];
+        if (op->kind != OSK_OP_TEXT && imf_unconfirmed(&o->f) && !force) break;
+        if (op->kind != OSK_OP_TEXT) force = false;
+        if (!o->f.active) continue;
+        if (op->kind == OSK_OP_TEXT) text_now(o, op->text, now);
+        else if (op->kind == OSK_OP_BACKSPACE) backspace_now(o, now);
+        else pick(o, op->text, op->lang, now);
+    }
+    memmove(o->queue, o->queue + i, sizeof o->queue[0] * (o->queued - i));
+    memset(o->queue + (o->queued - i), 0, sizeof o->queue[0] * i);
+    o->queued -= i;
+    o->queue_until = 0;
+    if (o->queued) {
+        o->queue_until = now + OSK_QUEUE_WAIT_MS;
+        if (!o->sync_at) o->sync_at = now + OSK_SYNC_MS;
+    }
+}
+
+bool osk_text(struct osk *o, const char *text, int64_t now)
+{
+    if (!o->f.active || !text || !*text) return false;
+    if (o->queued) hold(o, OSK_OP_TEXT, text, NULL, now);
+    else text_now(o, text, now);
     return true;
 }
 
@@ -288,16 +351,15 @@ bool osk_backspace(struct osk *o, int64_t now)
 {
     if (!o->f.active) return false;
     size_t n = imf_backspace_bytes(&o->f);
-    if (!n) {                           /* the key does it: the own view follows */
+    if (!n && !o->queued) {             /* the key does it: the own view follows */
         imf_key_backspace(&o->f);
         after_edit(o, now);
         return false;
     }
-    if (o->ops->im_send) o->ops->im_send(o->d, (uint32_t)n, "");
-    imf_edit(&o->f, n, "", now);
+    if (o->queued || imf_unconfirmed(&o->f)) hold(o, OSK_OP_BACKSPACE, NULL, NULL, now);
+    else backspace_now(o, now);
     o->bs_down = true;
     o->bs_next = now + OSK_REPEAT_DELAY_MS;
-    after_edit(o, now);
     return true;
 }
 
@@ -340,29 +402,40 @@ static bool after_space(uint32_t c)
 }
 
 /* a word picked from the strip, as one edit: it replaces the word being typed at the
- * cursor; with none there (a next word) right after a letter, a digit or punctuation
- * that ends something (after_space), a space goes before it. A space follows it, except
- * in an email field (it holds addresses) and in a URL field where the text being typed
- * looks like an address (address_like): a URL field is also where a browser takes a
- * search, and a plain word there gets its space. */
+ * cursor; with none there (a next word) right after a digit or punctuation that ends
+ * something (after_space), a space goes before it (right after a letter there always is
+ * a word being typed). A space follows it, except in an email field (it holds
+ * addresses) and in a URL field where the text being typed looks like an address
+ * (address_like): a URL field is also where a browser takes a search, and a plain word
+ * there gets its space.
+ *
+ * With a selection, the word is the one right before the selection, and the selection
+ * goes: every app replaces a selection with inserted text, but apps resolve a delete
+ * around a selection differently (a browser's address bar selects its own completion
+ * after the typed text and then deletes from the wrong end). So the text goes in alone
+ * first, over the selection; once the app reported that, the typed word and the text
+ * are replaced by the text, before a plain cursor (pick_second). */
 static void pick(struct osk *o, const char *word, const char *lang, int64_t now)
 {
     if (!o->f.active || imf_private(&o->f) || !*word) return;
-    size_t len, ws = imf_word_start(&o->f);
+    size_t len;
     const char *b = imf_before(&o->f, &len);
+    bool sel = o->f.surrounding && o->f.selection;
+    size_t end = sel ? o->f.sel_start : len;   /* the word ends here */
+    size_t ws = tr_word_start(b, end);
     bool addr = o->f.purpose == IM_P_EMAIL || (o->f.purpose == IM_P_URL && address_like(b, ws));
     bool lead = false;
-    if (ws == len && len && !addr) {
+    if (ws == end && end && !addr) {
         uint32_t c;
-        size_t p = tr_prev(b, len);
-        tr_dec(b + p, len - p, &c);
-        lead = tr_letter(c) || (c >= '0' && c <= '9') || after_space(c);
+        size_t p = tr_prev(b, end);
+        tr_dec(b + p, end - p, &c);
+        lead = (c >= '0' && c <= '9') || after_space(c);
     }
     char w[PC_WORD_MAX + 1];
     snprintf(w, sizeof w, "%s", word);
-    if (ws < len) {                     /* a capital typed stays a capital */
+    if (ws < end) {                     /* a capital typed stays a capital */
         uint32_t p, c;
-        tr_dec(b + ws, len - ws, &p);
+        tr_dec(b + ws, end - ws, &p);
         int wl = tr_dec(w, strlen(w), &c);
         char up[4];
         int ul = tr_enc(tr_upper(c), up);
@@ -370,28 +443,25 @@ static void pick(struct osk *o, const char *word, const char *lang, int64_t now)
     }
     if (lead) {                         /* learned after the space it gets */
         char ctx[IM_VIEW_MAX + 2];
-        memcpy(ctx, b, len);
-        ctx[len] = ' ';
-        learn(o, ctx, len + 1, w, strlen(w), lang, now);
-        memset(ctx, 0, len + 1);
+        memcpy(ctx, b, end);
+        ctx[end] = ' ';
+        learn(o, ctx, end + 1, w, strlen(w), lang, now);
+        memset(ctx, 0, end + 1);
     } else {
         learn(o, b, ws, w, strlen(w), lang, now);
     }
     char text[PC_WORD_MAX + 3];
     snprintf(text, sizeof text, "%s%s%s", lead ? " " : "", w, addr ? "" : " ");
-    uint32_t del = (uint32_t)(len - ws);
-    if (o->f.surrounding && o->f.selection && del) {
-        /* a selection (a browser's address bar selects its own completion after the
-         * typed text): apps resolve a delete around a selection differently, but every
-         * app replaces a selection with inserted text. So first the text alone, over the
-         * selection; once the app reported that, the typed word and the text are deleted
-         * and the text inserted again, before a plain cursor */
+    uint32_t del = (uint32_t)(end - ws);
+    if (sel) {
+        if (del) {                      /* the second step: the typed word and the text */
+            snprintf(o->pick_tail, sizeof o->pick_tail, "%.*s%s", (int)del, b + ws, text);
+            snprintf(o->pick_text, sizeof o->pick_text, "%s", text);
+            o->pick_until = now + OSK_PICK_WAIT_MS;
+            o->sync_at = now + OSK_SYNC_MS; /* some apps report only when asked */
+        }
         if (o->ops->im_send) o->ops->im_send(o->d, 0, text);
-        imf_edit(&o->f, 0, text, now);
-        snprintf(o->pick_text, sizeof o->pick_text, "%s", text);
-        o->pick_del = del + (uint32_t)strlen(text);
-        o->pick_until = now + OSK_PICK_WAIT_MS;
-        o->sync_at = now + OSK_SYNC_MS;     /* some apps report only when asked */
+        imf_edit(&o->f, len - end, text, now);   /* the view: the selected part replaced */
         after_edit(o, now);
         return;
     }
@@ -400,22 +470,32 @@ static void pick(struct osk *o, const char *word, const char *lang, int64_t now)
     after_edit(o, now);
 }
 
-/* the second step of a pick over a selection: the app took the first (its report
- * matches the view, no selection); the view still ends with the typed word and the
- * picked text; otherwise (or after OSK_PICK_WAIT_MS) it is dropped */
+/* the second step of a pick over a selection, once the app reported the first (its
+ * report matches the view, no selection) and the view still ends with the typed word
+ * and the text; otherwise (or after OSK_PICK_WAIT_MS) it is dropped */
 static void pick_second(struct osk *o, int64_t now)
 {
-    size_t len, t = strlen(o->pick_text);
+    size_t len, t = strlen(o->pick_tail);
     const char *b = imf_before(&o->f, &len);
-    bool ok = o->pick_until && now < o->pick_until && imf_settled(&o->f) && len >= o->pick_del &&
-              t <= o->pick_del && !memcmp(b + len - t, o->pick_text, t);
+    bool ok = o->pick_until && now < o->pick_until && imf_settled(&o->f) && len >= t &&
+              !memcmp(b + len - t, o->pick_tail, t);
     o->pick_until = 0;
     if (ok) {
-        if (o->ops->im_send) o->ops->im_send(o->d, o->pick_del, o->pick_text);
-        imf_edit(&o->f, o->pick_del, o->pick_text, now);
+        if (o->ops->im_send) o->ops->im_send(o->d, (uint32_t)t, o->pick_text);
+        imf_edit(&o->f, t, o->pick_text, now);
         after_edit(o, now);
     }
+    memset(o->pick_tail, 0, sizeof o->pick_tail);
     memset(o->pick_text, 0, sizeof o->pick_text);
+}
+
+/* a pick now would delete (a word being typed, a selection) */
+static bool pick_deletes(const struct osk *o)
+{
+    size_t len;
+    const char *b = imf_before(&o->f, &len);
+    if (o->f.selection) return true;
+    return tr_word_start(b, len) < len;
 }
 
 static void remove_word(struct osk *o, int64_t now)
@@ -491,7 +571,8 @@ void osk_strip_up(struct osk *o, int64_t now)
     char w[PC_WORD_MAX], l[PC_LANG_MAX];
     snprintf(w, sizeof w, "%s", o->s.words.word[i]);
     snprintf(l, sizeof l, "%s", o->s.words.lang[i]);
-    pick(o, w, l, now);
+    if (o->queued || (imf_unconfirmed(&o->f) && pick_deletes(o))) hold(o, OSK_OP_PICK, w, l, now);
+    else pick(o, w, l, now);
 }
 
 int osk_poll_fds(struct osk *o, struct pollfd *fds)
@@ -519,6 +600,7 @@ int64_t osk_next_deadline(const struct osk *o)
     if (o->bs_down) d = earliest(d, o->bs_next);
     if (o->sync_at) d = earliest(d, o->sync_at);
     if (o->pick_until) d = earliest(d, o->pick_until);
+    if (o->queued) d = earliest(d, o->queue_until);
     return d;
 }
 
@@ -528,14 +610,15 @@ void osk_tick(struct osk *o, int64_t now)
     if (o->sync_at && now >= o->sync_at) {
         /* the app reported late: an empty commit makes it report its newest text (and
          * resolve a following delete against that); again after each late answer, spaced,
-         * until the own edits arrive or IM_INFLIGHT_MS passed */
+         * until the own edits arrive or a report after IM_INFLIGHT_MS is taken as it is */
         o->sync_at = 0;
-        if (imf_late(&o->f, now) || (o->pick_until && !imf_settled(&o->f))) {
+        if (imf_late(&o->f, now) || (o->pick_until && !imf_settled(&o->f)) || o->queued) {
             imf_asked(&o->f);
             if (o->ops->im_send) o->ops->im_send(o->d, 0, "");
-            if (o->pick_until) o->sync_at = now + OSK_SYNC_MS;
+            if (o->pick_until || o->queued) o->sync_at = now + OSK_SYNC_MS;
         }
     }
+    if (o->queued && now >= o->queue_until) release(o, now, true);
     if (o->pick_until && now >= o->pick_until) pick_second(o, now);
     if (o->held >= 0 && now >= o->hold_at) {
         int i = o->held;
@@ -551,12 +634,9 @@ void osk_tick(struct osk *o, int64_t now)
         refresh(o, now);
     }
     if (o->bs_down && now >= o->bs_next) {
-        size_t n = imf_backspace_bytes(&o->f);
-        if (!n) { o->bs_down = false; return; }
-        if (o->ops->im_send) o->ops->im_send(o->d, (uint32_t)n, "");
-        imf_edit(&o->f, n, "", now);
+        if (!imf_backspace_bytes(&o->f) && !o->queued) { o->bs_down = false; return; }
+        if (o->queued || imf_unconfirmed(&o->f)) hold(o, OSK_OP_BACKSPACE, NULL, NULL, now);
+        else backspace_now(o, now);
         o->bs_next = now + OSK_REPEAT_MS;
-        after_edit(o, now);
-        o->bs_down = true;
     }
 }

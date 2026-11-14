@@ -30,6 +30,9 @@ hello() { ptr tap 460 875; ptr tap 180 825; ptr tap 700 875; ptr tap 700 875; pt
 hell() { ptr tap 460 875; ptr tap 180 825; ptr tap 700 875; ptr tap 700 875; sleep 0.8; }
 space() { ptr tap 400 975; sleep 0.8; }
 bs() { ptr tap 740 925; sleep 0.8; }
+# 80 ms a tap: h e l l o, space, h e l l, Backspace
+fast() { for k in "460 875" "180 825" "700 875" "700 875" "680 825" "400 975" "460 875" "180 825" "700 875" "700 875" "740 925"; do
+    echo "tap $k" > /tmp/ptr; sleep 0.08; done; sleep 1.5; }
 pick() { ptr tap 400 675; sleep 0.8; }  # the likeliest word, in the middle
 enter() { ptr tap 740 975; sleep 2; }
 # what the app reports (the keyboard's log): the last surrounding text
@@ -89,6 +92,8 @@ for f in ${ONLY:-gtk3 gtk4 gtk4view firefox chromium omnibox}; do
         expect "omnibox: hello, space, pick: one space between" "$(omni_text)" "hello world "; stop
         start omnibox; hello; pick; bs; pick; enter
         expect "omnibox: pick, Backspace, pick: the word again, no word glued on" "$(omni_text)" "Hello "; stop
+        start omnibox; fast; pick; enter
+        expect "omnibox: typed fast, with a Backspace, a pick" "$(omni_text)" "hello Hello "; stop
         start omnibox; hell; r=$(reported)
         echo "     (the address bar's report after 'hell': $r)"
         pick; enter
@@ -111,6 +116,12 @@ for f in ${ONLY:-gtk3 gtk4 gtk4view firefox chromium omnibox}; do
     expect "$f: pick, Backspace: the space deleted" "$(field_text)" "Hello|5"
     pick
     expect "$f: then a pick completes that word again, nothing glued on" "$(field_text)" "Hello |6"
+    stop
+    # typing fast (80 ms a tap): hello, space, hell, Backspace; then a pick
+    start $f; fast
+    expect "$f: typed fast, with a Backspace" "$(field_text)" "$w hel|9"
+    pick
+    expect "$f: ... then a pick replaces the word" "$(field_text)" "$w Hello |12"
     stop
 done
 exit $fail

@@ -27,6 +27,16 @@ enum osk_keys { OSK_LETTERS, OSK_EMAIL, OSK_URL, OSK_NUMBER, OSK_PHONE, OSK_PIN 
 #define OSK_REPEAT_MS 80          /* ... this often */
 #define OSK_SYNC_MS 30            /* after a late report: the empty commit asking for a fresh one */
 #define OSK_PICK_WAIT_MS 300      /* a pick over a selection: its second step waits this long */
+#define OSK_QUEUE_MAX 64          /* edits held while a delete waits for the app's text */
+#define OSK_QUEUE_WAIT_MS 150     /* ... at most this long each */
+
+/* an edit held back (see osk.c, hold) */
+enum { OSK_OP_TEXT, OSK_OP_BACKSPACE, OSK_OP_PICK };
+struct osk_op {
+    int kind;
+    char text[PC_WORD_MAX];     /* the text typed or the word picked */
+    char lang[PC_LANG_MAX];     /* a picked word's language */
+};
 
 struct osk_ops {
     /* delete del bytes before the cursor, insert text, apply both as one edit */
@@ -68,11 +78,14 @@ struct osk {
     bool bs_down;
     int64_t bs_next;
     int64_t sync_at;            /* an empty commit is due (the app reported late; 0: none) */
-    /* the second step of a pick over a selection (see pick_now): delete pick_del bytes
-     * before the cursor and insert pick_text, once the app reported the first; 0: none */
+    /* the second step of a pick over a selection (see pick in osk.c): pick_tail (the
+     * typed word and the text) replaced by pick_text, once the app reported the first;
+     * until pick_until (0: none) */
     int64_t pick_until;
-    uint32_t pick_del;
-    char pick_text[PC_WORD_MAX + 3];
+    char pick_tail[2 * PC_WORD_MAX + 8], pick_text[PC_WORD_MAX + 3];
+    struct osk_op queue[OSK_QUEUE_MAX];
+    int queued;
+    int64_t queue_until;        /* the first held edit goes then in any case */
 };
 
 void osk_init(struct osk *o, const struct osk_ops *ops, void *d, char **predictor,

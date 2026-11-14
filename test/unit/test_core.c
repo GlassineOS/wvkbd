@@ -27,6 +27,7 @@ static enum osk_keys last_keys;
 static bool shift_on;
 static int focus_state = -1;
 static char last_send[512];
+static char send_log[2048];      /* the sends since it was cleared: "del|text;" each */
 
 static void op_im_send(void *d, uint32_t del, const char *text)
 {
@@ -35,6 +36,8 @@ static void op_im_send(void *d, uint32_t del, const char *text)
     app[n - del] = 0;
     strncat(app, text, sizeof app - strlen(app) - 1);
     snprintf(last_send, sizeof last_send, "%u|%s", del, text);
+    size_t l = strlen(send_log);
+    snprintf(send_log + l, sizeof send_log - l, "%s;", last_send);
     edits++;
 }
 static void op_strip(void *d) { strip_draws++; }
@@ -599,6 +602,30 @@ static void test_late_reports(void)
     CHECK_STR("chromium: ... taken", imf_before(&o.f, &n), "He");
     osk_finish(&o);
 
+    /* Chromium, typing fast: a Backspace while own edits are unconfirmed waits for the
+     * app's text (a delete it would drop otherwise); what is typed after it waits behind */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "");
+    osk_text(&o, "h", now_ms());
+    osk_text(&o, "e", now_ms());
+    say(&o, "", 0, 0, IM_CAUSE_INPUT_METHOD);
+    send_log[0] = 0;
+    CHECK("fast: Backspace through the input method", osk_backspace(&o, now_ms()));
+    osk_backspace_up(&o);
+    osk_text(&o, "y", now_ms());
+    CHECK_STR("fast: nothing sent while unconfirmed", send_log, "");
+    say(&o, "h", 1, 1, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("fast: a late report: still waiting", send_log, "");
+    say(&o, "he", 2, 2, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("fast: confirmed: the Backspace, then the letter after it", send_log, "1|;0|y;");
+    CHECK_STR("fast: the view", imf_before(&o.f, &n), "hy");
+    send_log[0] = 0;
+    osk_backspace(&o, now_ms());
+    osk_backspace_up(&o);
+    run(&o, OSK_QUEUE_WAIT_MS + 50);
+    CHECK("fast: never confirmed: it goes after OSK_QUEUE_WAIT_MS", strstr(send_log, "1|;") != NULL);
+    osk_finish(&o);
+
     /* a browser address bar: a URL field with an inline completion selected after the
      * typed text (cursor 4, anchor 7) */
     fresh("ok");
@@ -631,6 +658,38 @@ static void test_late_reports(void)
     e0 = edits;
     run(&o, OSK_PICK_WAIT_MS + 50);
     CHECK("selection: unreported: no second step", strncmp(last_send, "9|", 2) && o.pick_until == 0);
+    osk_finish(&o);
+
+    /* a selected word (ending at the cursor) and a pick: the selection replaced, nothing
+     * before it deleted */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "");
+    say(&o, "foo bar", 7, 4, IM_CAUSE_OTHER);
+    e0 = edits;
+    tap_word(&o, "Bar");
+    CHECK_STR("selection: a selected word: the pick over it alone", last_send, "0|Bar ");
+    CHECK_STR("selection: ... the text before it stays", imf_before(&o.f, &n), "foo Bar ");
+    say(&o, "foo Bar ", 8, 8, IM_CAUSE_INPUT_METHOD);
+    run(&o, OSK_PICK_WAIT_MS + 50);
+    CHECK_INT("selection: ... one edit only", sends_since(e0), 1);
+    osk_finish(&o);
+
+    /* an edit the app refused (a full field): its reports keep the old text; after
+     * IM_INFLIGHT_MS the next one, asked for, is taken */
+    fresh("ok");
+    focus(&o, IM_P_NORMAL, 0, "abc");
+    osk_text(&o, "d", now_ms());
+    for (int i = 0; i < 4; i++) {
+        say(&o, "abc", 3, 3, IM_CAUSE_INPUT_METHOD);
+        run(&o, OSK_SYNC_MS + 20);
+    }
+    CHECK_STR("refused: within IM_INFLIGHT_MS the old text is late", imf_before(&o.f, &n), "abcd");
+    run(&o, IM_INFLIGHT_MS);
+    say(&o, "abc", 3, 3, IM_CAUSE_INPUT_METHOD);
+    CHECK_STR("refused: then the app's text", imf_before(&o.f, &n), "abc");
+    e0 = edits;
+    run(&o, OSK_SYNC_MS + 20);
+    CHECK_INT("refused: ... and no more asking", sends_since(e0), 0);
     osk_finish(&o);
 
     /* the space rules */
