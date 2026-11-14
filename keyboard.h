@@ -2,6 +2,7 @@
 #define __KEYBOARD_H
 
 #include "drw.h"
+#include "osk.h"
 
 #define MAX_LAYERS 25
 
@@ -24,6 +25,8 @@ enum key_type {
 	NextLayer, // Layout switch to the next layout in the layers sequence
 	Compose,   // Compose modifier key, switches to a specific associated layout
 	           // upon next keypress
+	Text,      /* glassine: commits the string in .text (e.g. ".com"); with no
+	            * input method, its characters one by one as Copy keys */
 	EndRow,    // Incidates the end of a key row
 	Last,      // Indicated the end of a layout
 };
@@ -61,6 +64,7 @@ struct clr_scheme {
 	int rounding;
 	PangoFontDescription *font_description;
 	PangoFontDescription *hint_font_description; /* glassine: the hold alternate's label */
+	PangoFontDescription *word_font, *best_font, *note_font; /* glassine: the strip's */
 };
 
 struct key {
@@ -85,6 +89,7 @@ struct key {
 	 * (as a Copy key does) and shows hold_label small in its corner */
 	const uint32_t hold;
 	const char *hold_label;
+	const char *text;        /* glassine: a Text key's string */
 
 	// actual coordinates on the surface (pixels), will be computed automatically
 	// for all keys
@@ -134,6 +139,18 @@ struct kbd {
 	bool hold_fired;         /* the alternate was typed */
 	int64_t hold_offset;     /* compositor time - monotime() at the press */
 
+	/* glassine: the input method (osk.h; NULL: plain keys only) and its strip, a row of
+	 * strip_h px above the keys; the keys the field asks for (keys_kind) and the layer to
+	 * go back to from a keypad; the layout whose language the predictor gets */
+	struct osk *osk;
+	uint32_t strip_h;
+	bool last_press_im;      /* the pressed key went through the input method */
+	enum osk_keys keys_kind;
+	struct layout *pad_return;
+	size_t pad_return_index;
+	struct layout *lang_layout;
+	const char *lang_override;
+
 	struct layout *layouts;
 	struct Output *output; //only used to keep track of landscape flipping, never dereferenced
 	enum layout_id *layers;
@@ -153,7 +170,7 @@ void draw_over_inset(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t width,
 
 void kbd_init(struct kbd *kb, struct layout *layouts,
               char *layer_names_list, char *landscape_layer_names_list);
-void kbd_init_layout(struct layout *l, uint32_t width, uint32_t height);
+void kbd_init_layout(struct layout *l, uint32_t y0, uint32_t width, uint32_t height);
 struct key *kbd_get_key(struct kbd *kb, uint32_t x, uint32_t y);
 size_t kbd_get_layer_index(struct kbd *kb, struct layout *l);
 void kbd_unpress_key(struct kbd *kb, uint32_t time);
@@ -176,6 +193,11 @@ int64_t monotime();
 /* glassine: long press; main.c owns the timer (a timerfd, -1: none) */
 extern int kbd_hold_timer_fd;
 void kbd_hold_fire(struct kbd *kb);
+/* glassine: the input method's side of the keys */
+void kbd_draw_strip(struct kbd *kb);
+void kbd_set_keys(struct kbd *kb, enum osk_keys kind);
+void kbd_reset_layer(struct kbd *kb);
+const char *kbd_lang(struct kbd *kb);
 
 #ifndef LAYOUT
 #error "make sure to define LAYOUT"

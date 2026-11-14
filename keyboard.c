@@ -11,6 +11,7 @@
 
 #include "drw.h"
 #include "os-compatibility.h"
+#include "textrules.h"
 
 #define MAX_LAYERS 25
 
@@ -43,6 +44,105 @@ hold_disarm(void)
 
 static void kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time);
 
+/* glassine: the input method's side of a key (osk.h). A private field: nothing typed
+ * is printed or logged */
+static bool
+kbd_private(struct kbd *kb)
+{
+    return kb->osk && imf_private(&kb->osk->f);
+}
+
+/* the key's label is one letter (a capital at a sentence start applies to it) */
+static bool
+letter_key(struct key *k)
+{
+    uint32_t c;
+    size_t n = strlen(k->label);
+    return n && (size_t)tr_dec(k->label, n, &c) == n && tr_letter(c);
+}
+
+static bool
+kbd_shifted(struct kbd *kb, struct key *k)
+{
+    return (kb->mods & Shift) ||
+           ((kb->mods & CapsLock) && strlen(k->label) == 1 && isalpha(k->label[0])) ||
+           (kb->osk && osk_shifted(kb->osk) && letter_key(k));
+}
+
+/* text through the input method; false: none is active, send keys */
+static bool
+kbd_commit(struct kbd *kb, const char *text)
+{
+    return kb->osk && osk_text(kb->osk, text, monotime());
+}
+
+/* the text a key types (NULL: it has none, a key event it is). buf: room for 5 */
+static const char *
+key_text(struct kbd *kb, struct key *k, char *buf)
+{
+    if (kb->mods & (Ctrl | Alt | Super | AltGr)) return NULL;
+    /* (a Copy key's code_mod is a code point, not modifiers) */
+    if (k->type != Copy && (k->code_mod & (Ctrl | Alt | Super))) return NULL;
+    bool sh = kbd_shifted(kb, k);
+    switch (k->type) {
+    case Code:
+        switch (k->code) {
+        case KEY_SPACE: return " ";
+        case KEY_ESC: case KEY_TAB: case KEY_ENTER: case KEY_KPENTER: case KEY_BACKSPACE:
+        case KEY_DELETE: case KEY_INSERT: case KEY_UP: case KEY_DOWN: case KEY_LEFT:
+        case KEY_RIGHT: case KEY_HOME: case KEY_END: case KEY_PAGEUP: case KEY_PAGEDOWN:
+            return NULL;
+        }
+        if (k->code >= KEY_F1 && k->code <= KEY_F12) return NULL;
+        {
+            const char *l = sh && k->shift_label ? k->shift_label : k->label;
+            uint32_t c;
+            size_t n = l ? strlen(l) : 0;
+            if (!n || n > 4 || (size_t)tr_dec(l, n, &c) != n || c < 0x20 || c == 0xFFFD) return NULL;
+            return l;
+        }
+    case Copy: {
+        uint32_t c = sh ? k->code_mod : k->code;
+        if (c < 0x20 || c > 0x10FFFF) return NULL;
+        buf[tr_enc(c, buf)] = 0;
+        return buf;
+    }
+    case Text:
+        return k->text;
+    default:
+        return NULL;
+    }
+}
+
+/* a key that went through the input method: drawn pressed, nothing to release */
+static void
+kbd_press_im(struct kbd *kb, struct key *k, uint32_t time)
+{
+    kb->last_swipe = kb->last_press = k;
+    kb->last_press_im = true;
+    kb->last_press_offset = time - monotime();
+    kbd_draw_key(kb, k, Press);
+    if ((kb->print || kb->print_intersect) && !kbd_private(kb))
+        kbd_print_key_stdout(kb, k);
+    if (kb->compose) kb->compose++;
+}
+
+/* a Text key with no input method: its characters as Copy keys, one after another */
+static void
+kbd_type_text(struct kbd *kb, const char *t, uint32_t time)
+{
+    for (size_t i = 0, n = strlen(t); i < n;) {
+        uint32_t c;
+        i += tr_dec(t + i, n - i, &c);
+        create_and_upload_keymap(kb, kb->layout->keymap_name, c);
+        zwp_virtual_keyboard_v1_modifiers(kb->vkbd, 0, 0, 0, 0);
+        zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_PRESSED);
+        zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_RELEASED);
+    }
+    create_and_upload_keymap(kb, kb->layout->keymap_name, 0);
+    zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
+}
+
 /* glassine: themable keys (outline, gap) */
 int kbd_key_border = 2;
 int kbd_stroke_width = 0;
@@ -71,9 +171,14 @@ draw_key_face(struct drwsurf *ds, struct key *k, uint32_t y, struct clr_scheme *
 #endif
 #include KEYMAP
 
+static struct layout *purpose_layout(struct kbd *kb, struct layout *l);
+static void lang_follow(struct kbd *kb, struct layout *l);
+
 void
 kbd_switch_layout(struct kbd *kb, struct layout *l, size_t layer_index)
 {
+    l = purpose_layout(kb, l);  /* glassine: an address field's bottom row */
+    lang_follow(kb, l);
     kb->prevlayout = kb->layout;
     if ((kb->layer_index != kb->last_abc_index) && (kb->layout->abc)) {
         kb->last_abc_layout = kb->layout;
@@ -247,15 +352,16 @@ kbd_init(struct kbd *kb, struct layout *layouts, char *layer_names_list,
 
     kb->layout = &kb->layouts[layer];
     kb->last_abc_layout = &kb->layouts[layer];
+    kb->lang_layout = kb->layout;    /* glassine */
 
     /* upload keymap */
     create_and_upload_keymap(kb, kb->layout->keymap_name, 0);
 }
 
 void
-kbd_init_layout(struct layout *l, uint32_t width, uint32_t height)
+kbd_init_layout(struct layout *l, uint32_t y0, uint32_t width, uint32_t height)
 {
-    uint32_t x = 0, y = 0;
+    uint32_t x = 0, y = y0;
     uint8_t rows = kbd_get_rows(l);
 
     l->keyheight = height / rows;
@@ -369,7 +475,12 @@ kbd_unpress_key(struct kbd *kb, uint32_t time)
         unlatch_super = (kb->mods & Super) == Super;
         unlatch_altgr = (kb->mods & AltGr) == AltGr;
 
-        if (kb->last_press->type == Copy) {
+        if (kb->last_press_im) {
+            /* glassine: it went through the input method: no key to release */
+            kb->last_press_im = false;
+            if (kb->osk && kb->last_press->type == Code && kb->last_press->code == KEY_BACKSPACE)
+                osk_backspace_up(kb->osk);
+        } else if (kb->last_press->type == Copy) {
             if (kb->debug) fprintf(stderr, "release copy key (unlatch_shift=%d, mods=%d)\n", unlatch_shift, kb->mods);
             zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, // the unicode key
                                         WL_KEYBOARD_KEY_STATE_RELEASED);
@@ -502,12 +613,16 @@ kbd_hold_fire(struct kbd *kb)
     struct key *k = kb->hold_key;
     uint32_t time = (uint32_t)(monotime() + kb->hold_offset);
     kb->hold_fired = true;
-    if (kb->debug) fprintf(stderr, "hold: %s -> U+%04X\n", k->label, k->hold);
-    create_and_upload_keymap(kb, kb->layout->keymap_name, k->hold);
-    zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
-    zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_PRESSED);   // the unicode key
-    zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_RELEASED);
-    if ((kb->print || kb->print_intersect) && k->hold_label) {
+    if (kb->debug && !kbd_private(kb)) fprintf(stderr, "hold: %s -> U+%04X\n", k->label, k->hold);
+    char t[5] = { 0 };
+    tr_enc(k->hold, t);
+    if (!kbd_commit(kb, t)) {
+        create_and_upload_keymap(kb, kb->layout->keymap_name, k->hold);
+        zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
+        zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_PRESSED);   // the unicode key
+        zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, WL_KEYBOARD_KEY_STATE_RELEASED);
+    }
+    if ((kb->print || kb->print_intersect) && k->hold_label && !kbd_private(kb)) {
         printf("%s", k->hold_label);
         fflush(stdout);
     }
@@ -542,8 +657,23 @@ kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time)
         }
     }
 
+    char tb[5];
+    const char *t;
     switch (k->type) {
     case Code:
+        /* glassine: with a field active, text goes through the input method (not
+         * shift+space, which is Tab) */
+        if (!(kb->shift_space_is_tab && k->code == KEY_SPACE && (kb->mods & Shift)) &&
+            (t = key_text(kb, k, tb)) && kbd_commit(kb, t)) {
+            kbd_press_im(kb, k, time);
+            break;
+        }
+        if (k->code == KEY_BACKSPACE && kb->osk && !(kb->mods & (Ctrl | Alt | Super | AltGr)) &&
+            osk_backspace(kb->osk, monotime())) {
+            kbd_press_im(kb, k, time);
+            break;
+        }
+        if (kb->osk && k->code != KEY_BACKSPACE) osk_key(kb->osk, k->code, monotime());
         if (k->code_mod) {
             zwp_virtual_keyboard_v1_key_mods(kb->vkbd, time, k->code_mod, WL_KEYBOARD_KEY_STATE_PRESSED);
             if (k->reset_mod) {
@@ -570,7 +700,7 @@ kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time)
                                         k->shift_code : k->code,
                                         WL_KEYBOARD_KEY_STATE_PRESSED);
         }
-        if (kb->print || kb->print_intersect)
+        if ((kb->print || kb->print_intersect) && !kbd_private(kb))
             kbd_print_key_stdout(kb, k);
         if (kb->compose) {
             if (kb->debug)
@@ -644,7 +774,19 @@ kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time)
             }
         }
         break;
+    case Text:
+        if (kbd_commit(kb, k->text)) {
+            kbd_press_im(kb, k, time);
+        } else if (k->text) {
+            kbd_type_text(kb, k->text, time);
+            kbd_press_im(kb, k, time);      /* typed already: nothing to release */
+        }
+        break;
     case Copy:
+        if ((t = key_text(kb, k, tb)) && kbd_commit(kb, t)) {
+            kbd_press_im(kb, k, time);
+            break;
+        }
         // copy code as unicode chr by setting a temporary keymap
         kb->last_swipe = kb->last_press = k;
         kb->last_press_offset = time - monotime();
@@ -661,7 +803,7 @@ kbd_press_key_now(struct kbd *kb, struct key *k, uint32_t time)
         zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
         zwp_virtual_keyboard_v1_key(kb->vkbd, time, KBD_UNICODE_KEY, // the unicode key
                                     WL_KEYBOARD_KEY_STATE_PRESSED);
-        if (kb->print || kb->print_intersect)
+        if ((kb->print || kb->print_intersect) && !kbd_private(kb))
             kbd_print_key_stdout(kb, k);
         break;
     default:
@@ -748,13 +890,13 @@ kbd_clear_last_popup(struct kbd *kb)
 void
 kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
 {
-    const char *label = ((kb->mods & Shift)||((kb->mods & CapsLock) && 
-        strlen(k->label) == 1 && isalpha(k->label[0]))) ? k->shift_label : k->label;
+    const char *label = kbd_shifted(kb, k) ? k->shift_label : k->label;
     if (kb->debug)
         fprintf(stderr, "Draw key +%d+%d %dx%d -> %s\n", k->x, k->y, k->w, k->h,
                 label);
     struct clr_scheme *scheme = &kb->schemes[k->scheme];
     if (hold_skip_press_draw && type == Press && k == kb->last_press) return;
+    if (!kb->surf->back_buffer || !kb->surf->back_buffer->cairo) return;   /* glassine: not shown yet */
 
     switch (type) {
     case None:
@@ -819,14 +961,17 @@ kbd_draw_layout(struct kbd *kb)
 {
     struct drwsurf *d = kb->surf;
     struct key *next_key = kb->layout->keys;
+    if (!d->back_buffer || !d->back_buffer->cairo) return;   /* glassine: not shown yet */
     if (kb->debug)
         fprintf(stderr, "Draw layout\n");
 
+    /* glassine: the keys' area only; the strip above them is drawn on its own */
+    uint32_t y0 = kb->strip_h < kb->h ? kb->strip_h : 0;
     if (kb->corner_radius > 0) {
-        drw_do_clear(d, 0, 0, kb->w, kb->h);
-        drw_fill_rectangle(d, kb->schemes[0].bg, 0, 0, kb->w, kb->h, kb->corner_radius);
+        drw_do_clear(d, 0, y0, kb->w, kb->h - y0);
+        drw_fill_rectangle(d, kb->schemes[0].bg, 0, y0, kb->w, kb->h - y0, kb->corner_radius);
     } else {
-        drw_fill_rectangle(d, kb->schemes[0].bg, 0, 0, kb->w, kb->h, 0);
+        drw_fill_rectangle(d, kb->schemes[0].bg, 0, y0, kb->w, kb->h - y0, 0);
     }
 
     while (next_key->type != Last) {
@@ -843,6 +988,8 @@ kbd_draw_layout(struct kbd *kb)
         next_key++;
     }
 }
+
+static void variants_resize(struct kbd *kb);
 
 void
 kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount)
@@ -861,9 +1008,12 @@ kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount)
                 fprintf(stderr, "Initialising unnamed layout %d, keymap %s\n",
                         i, layouts[i].keymap_name);
         }
-        kbd_init_layout(&layouts[i], kb->w, kb->h);
+        kbd_init_layout(&layouts[i], kb->strip_h, kb->w, kb->h - kb->strip_h);
     }
+    variants_resize(kb);
+    if (kb->osk) osk_strip_size(kb->osk, kb->w, kb->strip_h);
     kbd_draw_layout(kb);
+    kbd_draw_strip(kb);
 }
 
 void
@@ -925,4 +1075,250 @@ monotime()
     clock_gettime(CLOCK_MONOTONIC, &spec);
 
     return (spec.tv_sec * 1000 + spec.tv_nsec / 1000000);
+}
+
+/* ---- glassine: the input method's side of the layouts ------------------------------ */
+
+/* An email or web address field keeps the letters and changes their bottom row
+ * (GlassineOS/ui shell.keyboard.purpose): a copy of each letter layout with that row,
+ * made once. */
+#define NVARIANT 2                      /* OSK_EMAIL, OSK_URL */
+static struct layout *variant[NVARIANT][NumLayouts];
+
+static struct key row_email[] = {
+  {"⌨͕", "⌨͔", 1.5, NextLayer, .scheme = 1},
+  {"@", "@", 1.0, Copy, 0x0040, 0, 0x0040},
+  {"", "Tab", 3.0, Code, KEY_SPACE},
+  {".", ".", 1.0, Code, KEY_DOT},
+  {"-", "_", 1.0, Code, KEY_MINUS},
+  {"Enter", "Enter", 1.5, Code, KEY_ENTER, .scheme = 1},
+  {"", "", 0.0, Last},
+};
+static struct key row_url[] = {
+  {"⌨͕", "⌨͔", 1.5, NextLayer, .scheme = 1},
+  {"/", "/", 1.0, Code, KEY_SLASH},
+  {"", "Tab", 2.5, Code, KEY_SPACE},
+  {".", ".", 1.0, Code, KEY_DOT},
+  {".com", ".com", 1.5, Text, .scheme = 1, .text = ".com"},
+  {"Enter", "Enter", 1.5, Code, KEY_ENTER, .scheme = 1},
+  {"", "", 0.0, Last},
+};
+
+/* the layout with its last row replaced by row (NULL: it has no row with a space bar) */
+static struct layout *
+variant_make(struct layout *base, struct key *row)
+{
+    struct key *k = base->keys, *last_row = base->keys;
+    size_t n = 0;
+    bool space = false;
+    for (; k[n].type != Last; n++) {
+        if (k[n].type == EndRow) { last_row = &k[n + 1]; space = false; }
+        else if (k[n].type == Code && k[n].code == KEY_SPACE) space = true;
+    }
+    if (!space) return NULL;
+    size_t keep = (size_t)(last_row - base->keys), rn = 0;
+    while (row[rn].type != Last) rn++;
+    struct key *nk = calloc(keep + rn + 1, sizeof *nk);
+    struct layout *l = calloc(1, sizeof *l);
+    if (!nk || !l) { free(nk); free(l); return NULL; }
+    memcpy(nk, base->keys, keep * sizeof *nk);
+    memcpy(nk + keep, row, (rn + 1) * sizeof *nk);
+    memcpy(l, base, sizeof *l);
+    l->keys = nk;
+    return l;
+}
+
+static int
+layout_index(struct kbd *kb, struct layout *l)
+{
+    for (int i = 0; i < NumLayouts; i++) {
+        if (l == &kb->layouts[i]) return i;
+        for (int v = 0; v < NVARIANT; v++) if (variant[v][i] && l == variant[v][i]) return i;
+    }
+    return -1;
+}
+
+static struct layout *
+purpose_layout(struct kbd *kb, struct layout *l)
+{
+    int i = layout_index(kb, l);
+    if (i < 0) return l;
+    struct layout *base = &kb->layouts[i];
+    int v = kb->keys_kind == OSK_EMAIL ? 0 : kb->keys_kind == OSK_URL ? 1 : -1;
+    if (v < 0 || !base->abc) return base;
+    if (!variant[v][i]) {
+        variant[v][i] = variant_make(base, v ? row_url : row_email);
+        if (variant[v][i] && kb->w) kbd_init_layout(variant[v][i], kb->strip_h, kb->w, kb->h - kb->strip_h);
+    }
+    return variant[v][i] ? variant[v][i] : base;
+}
+
+static void
+variants_resize(struct kbd *kb)
+{
+    for (int v = 0; v < NVARIANT; v++)
+        for (int i = 0; i < NumLayouts; i++)
+            if (variant[v][i]) kbd_init_layout(variant[v][i], kb->strip_h, kb->w, kb->h - kb->strip_h);
+}
+
+static struct layout *
+layout_named(struct kbd *kb, const char *name)
+{
+    for (int i = 0; i < NumLayouts; i++)
+        if (kb->layouts[i].name && !strcmp(kb->layouts[i].name, name)) return &kb->layouts[i];
+    return NULL;
+}
+
+/* the field's purpose picks the keys (osk_ops.keys): a keypad, or the letters with an
+ * address row; back to the letters (the layer before the keypad) after it */
+void
+kbd_set_keys(struct kbd *kb, enum osk_keys kind)
+{
+    enum osk_keys old = kb->keys_kind;
+    bool was_pad = old == OSK_NUMBER || old == OSK_PHONE || old == OSK_PIN;
+    struct layout *pad = kind == OSK_NUMBER ? layout_named(kb, "padnumber") :
+                         kind == OSK_PHONE ? layout_named(kb, "padphone") :
+                         kind == OSK_PIN ? layout_named(kb, "padpin") : NULL;
+    if (kind == old && (!pad || kb->layout == pad)) return;
+    if (kind != OSK_LETTERS && kind != OSK_EMAIL && kind != OSK_URL && !pad) return;  /* a layout without keypads */
+    kb->keys_kind = kind;
+    if (pad) {
+        if (!was_pad) {
+            kb->pad_return = kb->layout;
+            kb->pad_return_index = kb->layer_index;
+        }
+        if (kb->pad_return) {           /* its Abc key (BackLayer) goes back there */
+            kb->last_abc_layout = kb->pad_return;
+            kb->last_abc_index = kb->pad_return_index;
+        }
+        kbd_switch_layout(kb, pad, kb->pad_return_index);
+        kb->last_abc_layout = kb->pad_return ? kb->pad_return : kb->last_abc_layout;
+        kb->last_abc_index = kb->pad_return_index;
+        return;
+    }
+    if (was_pad && kb->pad_return) {
+        struct layout *r = kb->pad_return;
+        kb->pad_return = NULL;
+        kbd_switch_layout(kb, r, kb->pad_return_index);
+        return;
+    }
+    if (kb->layout->abc && purpose_layout(kb, kb->layout) != kb->layout)
+        kbd_switch_layout(kb, kb->layout, kb->layer_index);
+}
+
+/* the layer to show: the first one, or the keypad the focused field asks for (no
+ * drawing: the keyboard is being shown) */
+void
+kbd_reset_layer(struct kbd *kb)
+{
+    struct layout *pad = kb->keys_kind == OSK_NUMBER ? layout_named(kb, "padnumber") :
+                         kb->keys_kind == OSK_PHONE ? layout_named(kb, "padphone") :
+                         kb->keys_kind == OSK_PIN ? layout_named(kb, "padpin") : NULL;
+    kb->lang_layout = kb->layout;
+    kb->pad_return = NULL;
+    if (pad) {
+        kb->pad_return = kb->last_abc_layout = kb->layout;
+        kb->pad_return_index = kb->last_abc_index = kb->layer_index;
+        kb->layout = kb->prevlayout = pad;
+    } else {
+        kb->layout = kb->prevlayout = purpose_layout(kb, kb->layout);
+    }
+}
+
+/* the predictor's language of a letter layout (the layouts' names are upstream's) */
+static const char *
+layout_lang(struct layout *l)
+{
+    static const char *const map[][2] = {
+        { "full", "en" }, { "fullwide", "en" }, { "simple", "en" }, { "landscape", "en" },
+        { "german", "de" }, { "cyrillic", "ru" }, { "arabic", "ar" }, { "persian", "fa" },
+        { "greek", "el" }, { "georgian", "ka" }, { "hebrew", "he" },
+    };
+    for (unsigned i = 0; l && l->name && i < sizeof map / sizeof *map; i++)
+        if (!strcmp(l->name, map[i][0])) return map[i][1];
+    return NULL;
+}
+
+/* a letter layout with a language becomes the one the predictor hears of */
+static void
+lang_follow(struct kbd *kb, struct layout *l)
+{
+    int i = layout_index(kb, l);
+    struct layout *base = i >= 0 ? &kb->layouts[i] : l;
+    if (!base->abc || !layout_lang(base) || base == kb->lang_layout) return;
+    kb->lang_layout = base;
+    if (kb->osk) osk_languages(kb->osk, kbd_lang(kb), monotime());
+}
+
+const char *
+kbd_lang(struct kbd *kb)
+{
+    if (kb->lang_override) return kb->lang_override;
+    const char *l = layout_lang(kb->lang_layout);
+    return l ? l : "";
+}
+
+/* the suggestion strip: its own rectangle only (an update is no full-panel refresh) */
+static void
+strip_face(struct kbd *kb, struct strip_item *it, struct clr_scheme *sc, Color fill)
+{
+    struct key k = { .x = it->x, .y = it->y, .w = it->w, .h = it->h };
+    draw_key_face(kb->surf, &k, k.y, sc, fill);
+}
+
+void
+kbd_draw_strip(struct kbd *kb)
+{
+    if (!kb->osk || !kb->strip_h || !kb->surf || !kb->surf->damage) return;
+    if (!kb->surf->back_buffer || !kb->surf->back_buffer->cairo) return;
+    struct strip *s = &kb->osk->s;
+    struct clr_scheme *sc = &kb->schemes[0], *sp = &kb->schemes[1];
+    if (kb->debug) fprintf(stderr, "Draw strip +0+0 %dx%d\n", kb->w, kb->strip_h);
+    drw_fill_rectangle(kb->surf, sc->bg, 0, 0, kb->w, kb->strip_h, 0);
+    struct strip_item it[STRIP_ITEMS];
+    int n = strip_items(s, it);
+    for (int i = 0; i < n; i++) {
+        struct strip_item *t = &it[i];
+        switch (t->kind) {
+        case SI_PEN:
+            strip_face(kb, t, sp, sp->fg);
+            drw_draw_icon(kb->surf, sp->text, t->x, t->y, t->w, t->h, DRW_ICON_PEN);
+            break;
+        case SI_HIDE:
+            strip_face(kb, t, sp, sp->fg);
+            drw_draw_icon(kb->surf, sp->text, t->x, t->y, t->w, t->h, DRW_ICON_HIDE);
+            break;
+        case SI_WORD:
+            strip_face(kb, t, sc, sc->fg);
+            drw_draw_text_ex(kb->surf, sc->text, t->x, t->y, t->w, t->h, KBD_KEY_BORDER + 4,
+                             s->words.word[t->word], t->best ? sc->best_font : sc->word_font, true);
+            break;
+        case SI_ASK_TEXT: {
+            char q[STRIP_TEXT_MAX];
+            strip_ask_text(s->ask, q, sizeof q);
+            drw_draw_text_ex(kb->surf, sc->text, t->x, t->y, t->w, t->h, KBD_KEY_BORDER, q, sc->note_font, true);
+            break;
+        }
+        case SI_KEEP:
+            strip_face(kb, t, sp, sp->fg);
+            drw_draw_text_ex(kb->surf, sp->text, t->x, t->y, t->w, t->h, KBD_KEY_BORDER, "Keep", sc->note_font, true);
+            break;
+        case SI_REMOVE:         /* the destructive choice: inverted, as a key that is down */
+            strip_face(kb, t, sc, sc->high);
+            drw_draw_text_ex(kb->surf, sc->text_press, t->x, t->y, t->w, t->h, KBD_KEY_BORDER, "Remove", sc->note_font, true);
+            break;
+        case SI_NOTE:
+            drw_draw_text_ex(kb->surf, sp->text, t->x, t->y, t->w, t->h, KBD_KEY_BORDER, s->note, sc->note_font, true);
+            break;
+        case SI_LOCK_NOTE: {
+            int tw = drw_text_width(kb->surf, STRIP_PRIVATE_TEXT, sc->note_font);
+            int ic = t->h / 2, gap = ic / 3;
+            if (tw > t->w - ic - gap) tw = t->w - ic - gap;
+            int x = t->x + (t->w - tw - ic - gap) / 2;
+            drw_draw_icon(kb->surf, sp->text, x, t->y, ic, t->h, DRW_ICON_LOCK);
+            drw_draw_text_ex(kb->surf, sp->text, x + ic + gap, t->y, tw, t->h, 0, STRIP_PRIVATE_TEXT, sc->note_font, true);
+            break;
+        }
+        }
+    }
 }
