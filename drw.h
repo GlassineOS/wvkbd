@@ -35,6 +35,10 @@ struct kbd;
 
 void drwsurf_resize(struct drwsurf *ds, uint32_t w, uint32_t h, double s);
 void drwsurf_attach(struct drwsurf *ds);
+/* glassine: draw on the back buffer directly (the paper's ink): flip first, then mark the
+ * rectangle drawn */
+void drwsurf_flip(struct drwsurf *ds);
+void drwsurf_damage(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
 typedef union {
 	uint8_t bgra[4];
@@ -60,7 +64,7 @@ void drw_draw_text_ex(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
                       uint32_t w, uint32_t h, uint32_t b, const char *label,
                       PangoFontDescription *font_description, bool ellipsize);
 int drw_text_width(struct drwsurf *ds, const char *label, PangoFontDescription *font_description);
-enum drw_icon { DRW_ICON_PEN, DRW_ICON_HIDE, DRW_ICON_LOCK };
+enum drw_icon { DRW_ICON_PEN, DRW_ICON_HIDE, DRW_ICON_LOCK, DRW_ICON_KEYS, DRW_ICON_CLOSE };
 void drw_draw_icon(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
                    uint32_t w, uint32_t h, enum drw_icon icon);
 

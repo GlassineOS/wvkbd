@@ -233,6 +233,22 @@ drw_draw_icon(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
         cairo_line_to(c, cx - s * 0.38, cy - s * 0.35);
         cairo_stroke(c);
         break;
+    case DRW_ICON_KEYS:         /* a keyboard */
+        cairo_rectangle(c, cx - s, cy - s * 0.6, s * 2, s * 1.2);
+        cairo_stroke(c);
+        for (int r = 0; r < 2; r++)
+            for (int k = 0; k < 4; k++)
+                cairo_rectangle(c, cx - s * 0.7 + k * s * 0.4, cy - s * 0.35 + r * s * 0.35, s * 0.18, s * 0.15);
+        cairo_rectangle(c, cx - s * 0.45, cy + s * 0.3, s * 0.9, s * 0.1);
+        cairo_fill(c);
+        break;
+    case DRW_ICON_CLOSE:        /* an X */
+        cairo_move_to(c, cx - s * 0.6, cy - s * 0.6);
+        cairo_line_to(c, cx + s * 0.6, cy + s * 0.6);
+        cairo_move_to(c, cx + s * 0.6, cy - s * 0.6);
+        cairo_line_to(c, cx - s * 0.6, cy + s * 0.6);
+        cairo_stroke(c);
+        break;
     }
     cairo_restore(c);
 }

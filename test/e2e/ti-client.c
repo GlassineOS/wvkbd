@@ -6,11 +6,14 @@
  * and every key event as "key CODE 1|0". Edits are counted: "edits N" after each done
  * that changed the text (a pick has to arrive as one edit).
  *
- * ti-client [-p PURPOSE] [-H HINTS] [-n] [-x] [-t TEXT]
+ * ti-client [-p PURPOSE] [-H HINTS] [-n] [-x] [-t TEXT] [-c X,Y,W,H]
  *   -p, -H  the field's content type (text-input-v3 numbers)
  *   -n      the field reports no surrounding text
  *   -x      no text input at all (an app without it: keys only)
- *   -t      the text the field starts with (the cursor at its end) */
+ *   -t      the text the field starts with (the cursor at its end)
+ *   -c      the cursor rectangle reported (surface coordinates; the input method's
+ *           popup is placed there). The preedit (pending text) is printed as
+ *           "preedit TEXT" when it changes. */
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
@@ -30,6 +33,7 @@ static struct zwp_text_input_manager_v3 *tim;
 static struct zwp_text_input_v3 *ti;
 static struct wl_surface *surf;
 static int purpose, hints, no_surrounding, no_ti, configured;
+static int crect[4] = { -1, -1, -1, -1 };
 static char text[8192];
 static size_t cursor;
 static uint32_t commits;
@@ -54,6 +58,7 @@ static void send_state(void)
 {
     if (!no_surrounding) zwp_text_input_v3_set_surrounding_text(ti, text, (int32_t)cursor, (int32_t)cursor);
     zwp_text_input_v3_set_content_type(ti, hints, purpose);
+    if (crect[0] >= 0) zwp_text_input_v3_set_cursor_rectangle(ti, crect[0], crect[1], crect[2], crect[3]);
     zwp_text_input_v3_commit(ti);
     commits++;
 }
@@ -200,12 +205,13 @@ static const struct wl_registry_listener reg_l = { reg, reg_rm };
 int main(int argc, char **argv)
 {
     int o;
-    while ((o = getopt(argc, argv, "p:H:nxt:")) != -1) {
+    while ((o = getopt(argc, argv, "p:H:nxt:c:")) != -1) {
         if (o == 'p') purpose = atoi(optarg);
         else if (o == 'H') hints = atoi(optarg);
         else if (o == 'n') no_surrounding = 1;
         else if (o == 'x') no_ti = 1;
         else if (o == 't') snprintf(text, sizeof text, "%s", optarg);
+        else if (o == 'c') sscanf(optarg, "%d,%d,%d,%d", &crect[0], &crect[1], &crect[2], &crect[3]);
     }
     cursor = strlen(text);
     struct wl_display *dpy = wl_display_connect(NULL);
