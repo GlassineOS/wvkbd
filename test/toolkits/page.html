@@ -1,0 +1,12 @@
+<!doctype html>
+<html><body>
+<!-- the toolkit test's field in a browser: its text on the console at every change -->
+<input id="i" style="width:90%;font-size:30px" autofocus>
+<script>
+var i = document.getElementById('i');
+function show() { console.log("text " + i.value + "|" + i.selectionStart); }
+i.addEventListener('input', show);
+document.addEventListener('selectionchange', show);
+setInterval(function () { if (document.activeElement !== i) i.focus(); }, 500);
+</script>
+</body></html>

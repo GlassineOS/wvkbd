@@ -216,6 +216,27 @@ Private fields (purpose password or PIN, or the sensitive data or hidden text
 hint) send nothing to the predictor, and with *-o* print nothing on standard
 output. The strip shows a lock in them and no pen key.
 
+A word picked from the strip replaces the word being typed at the cursor, or
+is inserted there, as one edit. A space follows it; inserted right after a
+digit or punctuation that ends something (, . ; : ! ? ) ] } and closing
+typographic quotes), a space goes before it too. In email fields no space
+follows; in URL fields none follows (and none goes before) while the text
+typed since the last space has a . / : or @, so a search typed into a
+browser's address bar gets its spaces. When the field has a selection, the
+pick replaces it and the word right before it: when there is such a word (an
+address bar selects its own completion after the typed text), in two edits,
+the picked text over the selection first, then, once the app reported it,
+the typed word and that text replaced by the text.
+
+Apps report their text after the keyboard's edits in different ways: late,
+half-way through an edit, or one edit behind. A report of text the field had
+before or during an edit still on its way is not taken as the field's text;
+the keyboard then sends an empty commit (again after each late answer, spaced,
+while its edits are on their way), which makes such apps report their newest
+text and resolve a following delete against it. A delete (Backspace, a pick
+that replaces a word) waits for that report, at most 150 ms; what is typed
+after it waits behind it.
+
 A word is learned when it is finished (a space, punctuation or Enter after it)
 or picked from the strip, once: finishing the same word at the same place again
 (after deleting the space after it) learns nothing more, until another key or a
