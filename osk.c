@@ -138,6 +138,22 @@ static void ask_words(struct osk *o, int64_t now, bool force)
     }
 }
 
+/* where a word starts, for the learned mark: the text before it (its last 256 bytes, so a
+ * field that reports only part of a long text still gives the same place) */
+static uint64_t word_place(const struct osk *o, size_t ws)
+{
+    size_t len;
+    const char *b = imf_before(&o->f, &len);
+    size_t from = ws > 256 ? ws - 256 : 0;
+    return fnv(0xcbf29ce484222325ULL, b + from, ws - from);
+}
+
+static bool learned_here(const struct osk *o, size_t ws, const char *word, size_t wl)
+{
+    return o->learned[0] && strlen(o->learned) == wl && !memcmp(o->learned, word, wl) &&
+           o->learned_at == word_place(o, ws);
+}
+
 static void learn(struct osk *o, size_t ws, const char *word, size_t wl, const char *picked, int64_t now)
 {
     if (!want_predictor(o)) return;
@@ -146,16 +162,22 @@ static void learn(struct osk *o, size_t ws, const char *word, size_t wl, const c
     char fld[160];
     imf_field_name(&o->f, fld, sizeof fld);
     pc_learn(&o->pc, o->langs, fld, b, ws, word, wl, picked, now);
+    if (wl < sizeof o->learned) {
+        memcpy(o->learned, word, wl);
+        o->learned[wl] = 0;
+        o->learned_at = word_place(o, ws);
+    } else {
+        o->learned[0] = 0;
+    }
 }
 
-/* the word before the cursor is finished (a space, punctuation, Enter after it) */
+/* the word before the cursor is finished (a space, punctuation, Enter after it); a word
+ * learned already at this place (picked, or finished before a Backspace) isn't again */
 static void finish_word(struct osk *o, int64_t now)
 {
     size_t len, ws = imf_word_start(&o->f);
     const char *b = imf_before(&o->f, &len);
-    if (ws < len && strlen(o->picked) == len - ws && !memcmp(o->picked, b + ws, len - ws)) ws = len;
-    if (ws < len) learn(o, ws, b + ws, len - ws, "", now);
-    o->picked[0] = 0;
+    if (ws < len && !learned_here(o, ws, b + ws, len - ws)) learn(o, ws, b + ws, len - ws, "", now);
 }
 
 static void update_shift(struct osk *o)
@@ -202,10 +224,11 @@ void osk_im_new(struct osk *o) { o->f.serial = 0; }
 void osk_im_done(struct osk *o, int64_t now)
 {
     int r = imf_done(&o->f, now);
+    if (r & IM_VIEW) o->learned[0] = 0; /* changed by other means: another place */
     if (r & (IM_FOCUS_OFF | IM_FOCUS_ON)) {
         o->words.n = 0;
         o->asked = 0;
-        o->picked[0] = 0;
+        o->learned[0] = 0;
         o->held = -1;
         o->bs_down = false;
         pc_forget(&o->pc);
@@ -265,7 +288,6 @@ bool osk_backspace(struct osk *o, int64_t now)
 {
     if (!o->f.active) return false;
     size_t n = imf_backspace_bytes(&o->f);
-    o->picked[0] = 0;
     if (!n) {                           /* the key does it: the own view follows */
         imf_key_backspace(&o->f);
         after_edit(o, now);
@@ -288,7 +310,7 @@ void osk_key(struct osk *o, uint32_t code, int64_t now)
 {
     if (!o->f.active) return;
     if (code == KEY_ENTER_ || code == KEY_KPENTER_) finish_word(o, now);
-    o->picked[0] = 0;
+    o->learned[0] = 0;                  /* the field may change by itself now (a sent message) */
     imf_lost(&o->f);
     after_edit(o, now);
 }
@@ -315,8 +337,7 @@ static void pick(struct osk *o, const char *word, const char *lang, int64_t now)
         if (tr_is_upper(p) && !tr_is_upper(w) && ul == wl) memcpy(text, up, ul);
     }
     learn(o, ws, text, strlen(text), lang, now);
-    if (address(o)) snprintf(o->picked, sizeof o->picked, "%s", text);
-    else strcat(text, " ");
+    if (!address(o)) strcat(text, " ");
     uint32_t del = (uint32_t)(len - ws);
     if (o->ops->im_send) o->ops->im_send(o->d, del, text);
     imf_edit(&o->f, del, text, now);

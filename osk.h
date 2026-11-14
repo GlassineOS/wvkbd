@@ -57,7 +57,12 @@ struct osk {
     int held;                   /* the strip item down (-1 none) */
     struct strip_item held_item;
     int64_t hold_at, note_until;
-    char picked[PC_WORD_MAX + 2]; /* a pick in an address field: learned already */
+    /* the word learned last and where (a hash of the text before it): finishing the
+     * same word there again (Backspace back into it, then a space or Enter) learns
+     * nothing, so a word counts once however often it is finished; forgotten after
+     * any other key and when the field changes by other means */
+    char learned[PC_WORD_MAX + 2];
+    uint64_t learned_at;
     bool bs_down;
     int64_t bs_next;
 };
