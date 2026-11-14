@@ -46,7 +46,10 @@ static void op_shift(void *d, bool on) { shift_on = on; shift_calls++; }
 static void op_hide(void *d) { hides++; }
 static void op_pen(void *d) { pens++; }
 static void op_focus(void *d, int s, uint32_t p) { focus_state = s; }
-static const struct osk_ops ops = { op_im_send, op_strip, op_keys, op_shift, op_hide, op_pen, op_focus };
+static const struct osk_ops ops = {
+    .im_send = op_im_send, .strip_changed = op_strip, .keys = op_keys, .shift = op_shift,
+    .hide = op_hide, .handwriting = op_pen, .focus = op_focus,
+};
 
 static char logpath[600];
 static char *fake[] = { "python3", "-u", NULL, NULL };

@@ -145,7 +145,21 @@ can be patched to add new features.
 
 *--pen-cmd* _command_
 	The strip's pen key (handwriting) runs this (with _sh -c_). Without it
-	there is no pen key.
+	(and without *--handwriting*) there is no pen key.
+
+*--handwriting* _command_
+	With *--im*: the handwriting recognizer, split at spaces (no shell) and
+	started as a child process on a socket pair at the first stroke, for the
+	recognizer line contract (docs/recognizer.md of GlassineOS/handwriting).
+	The pen key opens the writing paper. See *HANDWRITING*.
+
+*--pen-flag* _file_
+	With *--handwriting*: a show (*SIGUSR2*) finding _file_ removes it and
+	opens the paper instead of the keys when the field is empty (the session
+	creates it when a pen tapped the field).
+
+*--paper-height* _pixels_
+	Height of the writing paper. Defaults to the keyboard's height.
 	
 *--bg* _rrggbb|aa_ 
 	Set color of background
@@ -243,13 +257,43 @@ or picked from the strip, once: finishing the same word at the same place again
 change the field makes by itself. Holding a word in the
 strip asks whether to remove it.
 
+# HANDWRITING
+
+With *--handwriting*, the writing paper is the input method's popup: a sheet
+under the field's cursor with one guide line, a keys control and a put-away
+control. The keyboard draws the ink itself and, where the compositor offers
+glassine-ink-v1, registers the paper as an ink area with a pen brush.
+
+Each stroke goes to the recognizer as it ends and is read; after a pause
+(*handwriting_pause*) the reading is the field's pending (preedit) text, the ink
+dims, and a row above it shows the reading between two alternatives and a
+correction control. Writing on commits the pending text as it was read. Tapping
+an alternative commits it and teaches the recognizer (a short note says so);
+the correction control opens an edit field with the keys under the paper (the
+strip shows the readings, Enter or *Use* commits and teaches). A space follows
+committed text except in email and web address fields.
+
+Gestures: a strike-through deletes the characters it covers (on bare paper, the
+last word before the cursor), a scratch-out discards the pending text, a caret
+inserts a space. The keys control commits the pending text and shows the keys;
+the put-away control commits it and hides everything. When the field goes, its
+pending text is dropped.
+
+The pen draws: the paper takes pointer events as strokes (a tablet pen reaches a
+client without tablet support as the pointer). Touch only taps the controls, so
+a resting hand writes nothing. Private fields get no paper and no pen key, and
+nothing of them reaches the recognizer. A missing or crashed recognizer leaves
+ink without readings; it is started again with a growing delay.
+
 # FILES
 
 _$XDG_CONFIG_HOME/glassine/predict.conf_ (or _~/.config/glassine/predict.conf_)
 	*suggestions = off* leaves the strip empty and sends nothing to the
-	predictor; *handwriting = off* hides the pen key (*off*, *false* or *0*;
-	anything else, or no line, is on). Read again at each field focus and
-	each show.
+	predictor; *handwriting = off* hides the pen key and the paper (*off*,
+	*false* or *0*; anything else, or no line, is on);
+	*handwriting_pause =* _milliseconds_ (200 to 5000, default 800) is the
+	pause after the last stroke before the written text shows. Read again at
+	each field focus and each show.
 
 # SIGNALS
 
