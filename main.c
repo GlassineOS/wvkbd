@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/signalfd.h>
+#include <sys/timerfd.h>
 #include <poll.h>
 #include <unistd.h>
 #include <wayland-client-protocol.h>
@@ -680,6 +681,7 @@ usage(char *argv0)
     fprintf(stderr, "  -R [int]    - Rounding radius in pixels\n");
     fprintf(stderr, "  --fn [font] - Set font (e.g: DejaVu Sans 20)\n");
     fprintf(stderr, "  --hidden    - Start hidden (send SIGUSR2 to show)\n");
+    fprintf(stderr, "  --hold [ms]            - Long press: a held key types its alternate after ms (default 400, 0: off)\n");
     fprintf(stderr, "  --no-popup             - Disable the key-press popup\n");
     fprintf(stderr, "  --no-highlight         - Don't highlight a key while pressed\n");
     fprintf(stderr, "  --no-feedback          - Disable all key-press feedback "
@@ -928,6 +930,7 @@ main(int argc, char **argv)
     keyboard.corner_radius = 0;
     keyboard.show_popup = true;
     keyboard.show_highlight = true;
+    keyboard.hold_ms = 400;     /* glassine: long press (--hold) */
 
     uint8_t alpha = 0;
     bool alpha_defined = false;
@@ -1111,6 +1114,14 @@ main(int argc, char **argv)
         } else if ((!strcmp(argv[i], "-hidden")) ||
                    (!strcmp(argv[i], "--hidden"))) {
             hidden = true;
+        } else if ((!strcmp(argv[i], "-hold")) ||
+                   (!strcmp(argv[i], "--hold"))) {
+            if (i >= argc - 1) {
+                usage(argv[0]);
+                exit(1);
+            }
+            keyboard.hold_ms = atoi(argv[++i]);
+            if (keyboard.hold_ms < 0) keyboard.hold_ms = 0;
         } else if ((!strcmp(argv[i], "-no-popup")) ||
                    (!strcmp(argv[i], "--no-popup"))) {
             keyboard.show_popup = false;
@@ -1286,16 +1297,33 @@ main(int argc, char **argv)
     for (i = 0; i < countof(schemes); i++) {
         schemes[i].font_description =
             pango_font_description_from_string(schemes[i].font);
+        /* glassine: the hold alternate's label, 55 % of the key font */
+        schemes[i].hint_font_description = pango_font_description_copy(schemes[i].font_description);
+        int fs = pango_font_description_get_size(schemes[i].font_description);
+        if (fs > 0) {
+            if (pango_font_description_get_size_is_absolute(schemes[i].font_description))
+                pango_font_description_set_absolute_size(schemes[i].hint_font_description, fs * 0.55);
+            else
+                pango_font_description_set_size(schemes[i].hint_font_description, (int)(fs * 0.55));
+        }
     }
 
     if (!hidden)
         show();
 
-    struct pollfd fds[2];
+    struct pollfd fds[3];
     int WAYLAND_FD = 0;
     int SIGNAL_FD = 1;
+    int HOLD_FD = 2;    /* glassine: long press */
     fds[WAYLAND_FD].events = POLLIN;
     fds[SIGNAL_FD].events = POLLIN;
+    fds[HOLD_FD].events = POLLIN;
+    kbd_hold_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    if (kbd_hold_timer_fd < 0) {
+        fprintf(stderr, "no timerfd (%d): long press off\n", errno);
+        keyboard.hold_ms = 0;
+    }
+    fds[HOLD_FD].fd = kbd_hold_timer_fd;
 
     fds[WAYLAND_FD].fd = wl_display_get_fd(display);
     if (fds[WAYLAND_FD].fd == -1) {
@@ -1319,7 +1347,7 @@ main(int argc, char **argv)
 
     while (run_display) {
         wl_display_flush(display);
-        poll(fds, 2, -1);
+        poll(fds, 3, -1);
 
         if (fds[WAYLAND_FD].revents & POLLIN)
             wl_display_dispatch(display);
@@ -1328,6 +1356,12 @@ main(int argc, char **argv)
         }
         if (fds[WAYLAND_FD].revents & POLLHUP) {
             die("Wayland socket has been disconnected.\n");
+        }
+
+        if (fds[HOLD_FD].revents & POLLIN) {
+            uint64_t n;
+            if (read(fds[HOLD_FD].fd, &n, sizeof n) == sizeof n)
+                kbd_hold_fire(&keyboard);
         }
 
         if (fds[SIGNAL_FD].revents & POLLIN) {

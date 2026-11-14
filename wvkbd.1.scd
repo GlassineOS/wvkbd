@@ -51,6 +51,12 @@ can be patched to add new features.
 *--hidden*
 	Start hidden (send SIGUSR2 to show).
 
+*--hold* _ms_
+	Long press: a key that has an alternate (printed small in its top right
+	corner) types it when held for _ms_ milliseconds; released sooner, it types
+	its own character. Keys without an alternate are unchanged. Default 400;
+	0 turns it off. Only the German layer has alternates.
+
 *--no-popup*
 	Disable the key-press popup (the magnified key shown above a key while
 	it is held). Useful for privacy, e.g. when typing on a lockscreen.
