@@ -110,7 +110,7 @@ int paper_chip_order(int n, int slot)
 int paper_items(const struct paper *p, struct paper_item *out)
 {
     int n = 0, c = p->ctl, m = c / 4, gap = c / 5;
-    int x1 = p->w - m - 2 * c - m;                  /* the row ends before the controls */
+    int x1 = p->w - m - 3 * c - m;                  /* the row ends before the controls */
     if (p->fixing) {
         int uw = 2 * c, ew = x1 - m - uw - gap;
         if (ew < c) ew = c;
@@ -118,16 +118,18 @@ int paper_items(const struct paper *p, struct paper_item *out)
         out[n++] = (struct paper_item){ PI_USE, m + ew + gap, m, uw, c, 0 };
     } else if (p->pending && p->ncand > 0) {
         int k = p->ncand > PAPER_CANDS ? PAPER_CANDS : p->ncand;
-        int room = x1 - m - c - gap * k;
+        int room = x1 - m - 2 * c - gap * (k + 1);
         int cw = room / PAPER_CANDS;
-        int total = k * cw + k * gap + c;
+        int total = k * cw + (k + 1) * gap + 2 * c;
         int x = m + (x1 - m - total) / 2;
         for (int slot = 0; slot < k; slot++) {
             out[n++] = (struct paper_item){ PI_CHIP, x, m, cw, c, paper_chip_order(k, slot) };
             x += cw + gap;
         }
         out[n++] = (struct paper_item){ PI_FIX, x, m, c, c, 0 };
+        out[n++] = (struct paper_item){ PI_DROP, x + c + gap, m, c, c, 0 };
     }
+    out[n++] = (struct paper_item){ PI_BACK, p->w - m - 3 * c, m, c, c, 0 };
     out[n++] = (struct paper_item){ PI_KEYS, p->w - m - 2 * c, m, c, c, 0 };
     out[n++] = (struct paper_item){ PI_CLOSE, p->w - m - c, m, c, c, 0 };
     if (p->note[0]) {

@@ -45,6 +45,13 @@ wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus these changes:
     a caret inserts a space. The pen draws (pointer events: a tablet pen as
     the compositor hands it to a client without tablet support); a finger
     only taps the controls. Private fields: no paper, nothing sent.
+    The paper's corner has Backspace (the pending reading's last character
+    first, else the character before the cursor; it repeats while held) next
+    to the keys and put-away controls; with a reading, a discard control
+    after the correction control drops the reading and its ink. SIGWINCH
+    (the session saw the pen come into range): with the keys up, the paper
+    opens, unless within 150 ms the pen turns out to hover over the keys
+    (there to tap one); nothing flips back on its own.
       --handwriting CMD  the recognizer (docs/recognizer.md of
                          GlassineOS/handwriting), started on the first stroke;
                          the pen key opens the paper. Missing or crashed: ink
