@@ -516,7 +516,7 @@ static void test_controls(void)
     tap(PI_BACK);
     write_letter(300);                  /* writing on commits it */
     run(&o, 100);
-    CHECK_STR("an edited reading commits as edited", app, "aw ");
+    CHECK_STR("an edited reading commits as edited (a space before it: right after a word)", app, "a w ");
     CHECK_INT("... no lesson", log_count("confirm"), 0);
     run(&o, PAUSE + 100);
 
@@ -524,7 +524,7 @@ static void test_controls(void)
     CHECK("discard shows with a reading", o.pp.pending && item(PI_DROP, &x, &y));
     tap(PI_DROP);
     CHECK("discard: no pending text, no ink", !pre[0] && !o.pp.pending && o.pp.ns == 0);
-    CHECK_STR("discard: the field unchanged", app, "aw ");
+    CHECK_STR("discard: the field unchanged", app, "a w ");
     CHECK("discard: the paper stays", o.paper_up && view == OSK_VIEW_PAPER);
     CHECK("discard: not there without a reading", !item(PI_DROP, &x, &y));
 
@@ -722,6 +722,51 @@ static void test_private(void)
     conf("handwriting_pause = 200\n");
 }
 
+/* the spaces around a committed reading (spec 006 FR-012): FAKE_TEXTS names the readings
+ * by stroke count */
+static void commit_words(uint32_t purpose, const char *text, const int *counts, int n)
+{
+    fresh("ok", fake);
+    focus(purpose, 0, text, true);
+    for (int i = 0; i < n; i++) {
+        osk_paper_open(&o, now_ms());
+        for (int k = 0; k < counts[i]; k++) write_letter(100 + 80 * k);
+        run(&o, PAUSE + 100);
+        osk_paper_end(&o, now_ms());    /* putting the paper away commits the reading */
+        run(&o, 50);
+    }
+    osk_finish(&o);
+}
+
+static void test_spacing(void)
+{
+    static const int one[] = { 1 }, two[] = { 1, 2 }, addr[] = { 3, 4 };
+    setenv("FAKE_TEXTS", "1=apple,2=banana,3=example,4=.com", 1);
+    commit_words(IM_P_NORMAL, "", two, 2);
+    CHECK_STR("prose: a space after each reading", app, "apple banana ");
+    commit_words(IM_P_NORMAL, "I said", one, 1);
+    CHECK_STR("prose, right after a word: a space before it too", app, "I said apple ");
+    commit_words(IM_P_NORMAL, "Yes,", one, 1);
+    CHECK_STR("prose, after a comma: a space before it", app, "Yes, apple ");
+    commit_words(IM_P_NORMAL, "(", one, 1);
+    CHECK_STR("prose, after an opening bracket: none before", app, "(apple ");
+    commit_words(IM_P_NORMAL, "a ", addr, 2);
+    CHECK_STR("prose: a reading of punctuation gets no space before it", app, "a example .com ");
+    commit_words(IM_P_URL, "", two, 2);
+    CHECK_STR("url, a search: spaces as in prose", app, "apple banana ");
+    commit_words(IM_P_URL, "", addr, 2);
+    CHECK_STR("url, an address: the paper's space taken back, none after", app, "example.com");
+    commit_words(IM_P_URL, "www", one, 1);
+    CHECK_STR("url, www: an address, no space before or after", app, "wwwapple");
+    commit_words(IM_P_URL, "http://x.org/", one, 1);
+    CHECK_STR("url, after an address: no spaces", app, "http://x.org/apple");
+    commit_words(IM_P_URL, "see", one, 1);
+    CHECK_STR("url, a search after a typed word: a space before", app, "see apple ");
+    commit_words(IM_P_EMAIL, "me", two, 2);
+    CHECK_STR("email: no spaces", app, "meapplebanana");
+    unsetenv("FAKE_TEXTS");
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -741,6 +786,7 @@ int main(int argc, char **argv)
     test_writing();
     test_controls();
     test_gestures();
+    test_spacing();
     test_private();
     unlink(logpath);
     return T_DONE();

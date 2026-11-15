@@ -1,7 +1,7 @@
 #!/bin/sh
 # (inside the container, see test.sh) /src = this checkout, /t = test/e2e (its build and
 # virtual pointer), /k = this directory, /p = GlassineOS/shell's src. ONLY: a list of the
-# fields to run (gtk3 gtk4 gtk4view firefox chromium omnibox). The keyboard's protocol
+# fields to run (gtk3 gtk4 gtk4view firefox chromium omnibox omnibox-paper). The keyboard's protocol
 # log (WAYLAND_DEBUG) shows what each app reports; DEBUG=1 prints it on a failure.
 set -u
 sh /t/build.sh || exit 1
@@ -69,7 +69,7 @@ start() {
         MOZ_ENABLE_WAYLAND=1 GTK_IM_MODULE=wayland firefox --no-remote --profile /tmp/ff --kiosk file:///k/page.html > /tmp/f.out 2>/tmp/f.err & FP=$! ;;
     chromium|omnibox)
         rm -rf /tmp/ch
-        if [ $1 = chromium ]; then u="--kiosk file:///k/page.html"; else u="--remote-debugging-port=9222 about:blank"; fi
+        if [ $1 = chromium ]; then u="--kiosk file:///k/page.html"; else u="--remote-debugging-port=9222 ${2:-about:blank}"; fi
         chromium --no-sandbox --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3 \
             --user-data-dir=/tmp/ch --no-first-run --disable-gpu --enable-logging=stderr --v=0 $u > /tmp/f.out 2>/tmp/f.err & FP=$! ;;
     esac
@@ -82,7 +82,59 @@ start() {
 }
 stop() { kill $FP 2>/dev/null; sleep 1; pkill -9 -f firefox; pkill -9 -f chromium; pkill -9 -f field.py; wait $FP 2>/dev/null; sleep 0.5; }
 
-for f in ${ONLY:-gtk3 gtk4 gtk4view firefox chromium omnibox}; do
+# the paper over the address bar: the stand-in recognizer (its readings by stroke count),
+# strokes and taps at paper coordinates (the paper's offset found where the pointer enters it)
+paper_at() {   # (again for each word: the paper follows the cursor)
+    o=; ptr move 790 5
+    for y in 20 60 100 150 200 300 400 500 600; do
+        k=$(grep -ac '^Paper: pointer in' /tmp/kbd.err)
+        ptr move 400 $y
+        [ "$(grep -ac '^Paper: pointer in' /tmp/kbd.err)" -gt "$k" ] || continue
+        o=$(grep -a '^Paper: pointer in' /tmp/kbd.err | tail -1 | sed 's/.* in //'); y0=$y; break
+    done
+    [ -n "$o" ] && echo "     (the paper: screen 400,$y0 = paper $o)"
+    [ -n "$o" ] || { echo "FAIL the paper: not found"; fail=1; grep -a '^Paper\|^paper\|^view\|^Resize' /tmp/kbd.err | tail -8; o=0,0; y0=0; }
+    dx=$((400 - ${o%,*})); dy=$((y0 - ${o#*,}))
+}
+pp() { ptr "$1" $(for q in $2; do echo $((${q%,*} + dx)),$((${q#*,} + dy)); done); }
+write() {   # stroke counts: each word on a fresh paper (the pen key), its strokes in one
+    for c in "$@"; do   # go, committed by the session's hide (the paper follows the cursor:
+        kill -USR2 $KP; sleep 1; ptr tap 40 675; sleep 1   # a commit moves it)
+        paper_at; i=0
+        while [ $i -lt $c ]; do
+            echo stroke $((100 + i * 100 + dx)),$((200 + dy)) $((140 + i * 100 + dx)),$((230 + dy)) $((170 + i * 100 + dx)),$((210 + dy)) > /tmp/ptr
+            i=$((i + 1))
+        done
+        sleep 2; kill -USR1 $KP; sleep 1.5
+    done
+}
+pkbd() {
+    FAKE_TEXTS="1=apple,2=banana,3=example,4=.com" WAYLAND_DEBUG=1 $B/wvkbd/wvkbd-mobintl --im --auto --hidden --strip \
+        -H 300 --no-popup -o -D -l full,special --predictor /tmp/glassine-predict \
+        --handwriting "python3 -u /src/test/fake-recognizer.py" > /dev/null 2>/tmp/kbd.err & KP=$!; sleep 0.8
+}
+omnibox_paper() {   # URL, then stroke counts: the address bar's text as reported. The
+    pkbd            # paper is the keyboard's popup at the address bar's cursor, partly off
+    start omnibox $1; shift   # the screen: the keyboard goes before the browser (a field
+                              # going under an open paper takes the test's sway down)
+    write "$@"
+    R=$(reported)
+}
+
+for f in ${ONLY:-gtk3 gtk4 gtk4view firefox chromium omnibox omnibox-paper}; do
+    if [ $f = omnibox-paper ]; then
+        pkill -f wvkbd-mobintl; sleep 0.5
+        omnibox_paper about:blank 1 2; kill $KP; wait $KP 2>/dev/null; stop
+        expect "omnibox, the paper: a search gets its spaces" "$R" '("apple banana ", 13, 13)'
+        omnibox_paper about:blank 3 4
+        kill -USR2 $KP 2>/dev/null; sleep 1; enter       # (no report after the last edit: Enter, the page's address)
+        u=$(wget -qO- http://127.0.0.1:9222/json/list 2>/dev/null | python3 -c 'import json,sys; print([t["url"] for t in json.load(sys.stdin) if t["type"]=="page"][0])')
+        kill $KP 2>/dev/null; wait $KP 2>/dev/null; stop
+        expect "omnibox, the paper: an address doesn't (example, .com)" "${u#*://}" "example.com/"
+        omnibox_paper file:///k/page.html 1 2; kill $KP; wait $KP 2>/dev/null; stop
+        expect "omnibox, the paper: a search over the selected address" "$R" '("apple banana ", 13, 13)'
+        continue
+    fi
     if [ $f = omnibox ]; then
         # the address bar: a URL field (the purpose) that also takes searches; read back
         # as the search it sends on Enter ("oq", the query as typed, spaces kept)
