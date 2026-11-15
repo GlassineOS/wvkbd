@@ -1,9 +1,9 @@
 /* glassine: the writing paper (GlassineOS/shell spec 006 FR-010..FR-013a; the shell.write
  * boards of GlassineOS/ui): a sheet laid over the app at the field's cursor, as the input
- * method's popup. One guide line to write on; two controls in the top right corner (keys,
- * put away); while text is pending, a row along the top edge with the alternatives (the
- * read text in the middle) and a correction control; while correcting, an edit field and
- * Use in that row instead; a short note at the bottom after the paper learned something.
+ * method's popup. One guide line to write on; three controls in the top right corner
+ * (Backspace, keys, put away); while text is pending, a row along the top edge with the
+ * alternatives (the read text in the middle), a correction control and a discard control;
+ * while correcting, an edit field and Use in that row instead; a short note at the bottom after the paper learned something.
  *
  * This is the model and its geometry (no drawing, no Wayland): the ink written on it, the
  * readings, and where everything is. osk.c runs it; keyboard.c draws it. */
@@ -34,6 +34,8 @@ struct paper_stroke {
 enum paper_kind {
     PI_CHIP,                      /* a reading (cand: its index, 0 = the best) */
     PI_FIX,                       /* the correction control (a pencil) */
+    PI_DROP,                      /* discard the reading and its ink */
+    PI_BACK,                      /* Backspace */
     PI_KEYS,                      /* switch to keys */
     PI_CLOSE,                     /* put the paper away */
     PI_EDIT,                      /* the edit field (correcting) */
@@ -41,7 +43,7 @@ enum paper_kind {
     PI_NOTE,                      /* the note */
 };
 
-#define PAPER_ITEMS 10
+#define PAPER_ITEMS 12
 
 struct paper_item {
     enum paper_kind kind;

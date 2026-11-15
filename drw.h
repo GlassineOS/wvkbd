@@ -64,7 +64,7 @@ void drw_draw_text_ex(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
                       uint32_t w, uint32_t h, uint32_t b, const char *label,
                       PangoFontDescription *font_description, bool ellipsize);
 int drw_text_width(struct drwsurf *ds, const char *label, PangoFontDescription *font_description);
-enum drw_icon { DRW_ICON_PEN, DRW_ICON_HIDE, DRW_ICON_LOCK, DRW_ICON_KEYS, DRW_ICON_CLOSE };
+enum drw_icon { DRW_ICON_PEN, DRW_ICON_HIDE, DRW_ICON_LOCK, DRW_ICON_KEYS, DRW_ICON_CLOSE, DRW_ICON_BACK, DRW_ICON_DROP };
 void drw_draw_icon(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
                    uint32_t w, uint32_t h, enum drw_icon icon);
 

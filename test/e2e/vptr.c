@@ -1,7 +1,7 @@
 /* vptr: a virtual pointer for the end-to-end test (run.sh). It keeps the seat's pointer
  * capability while it runs and reads commands from a FIFO, one per line, in layout px of
  * the output (W x H from argv):
- *   tap X Y | hold X Y MS | down X Y | up
+ *   tap X Y | hold X Y MS | down X Y | up | move X Y (no button: a pen hovering)
  *   stroke X,Y X,Y ...   pressed from the first point to the last (a pen writing; sway
  *                        hands a pen to a client without tablet support as this pointer)
  * vptr FIFO W H */
@@ -69,6 +69,7 @@ int main(int argc, char **argv)
             if (sscanf(l, "tap %d %d", &x, &y) == 2) { move(x, y); btn(1); usleep(60000); btn(0); }
             else if (sscanf(l, "hold %d %d %d", &x, &y, &t) == 3) { move(x, y); btn(1); usleep(t * 1000); btn(0); }
             else if (sscanf(l, "down %d %d", &x, &y) == 2) { move(x, y); btn(1); }
+            else if (sscanf(l, "move %d %d", &x, &y) == 2) move(x, y);
             else if (!strncmp(l, "up", 2)) btn(0);
             else if (!strncmp(l, "stroke ", 7)) {
                 char *p = l + 7;

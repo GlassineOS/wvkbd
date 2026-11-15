@@ -193,8 +193,9 @@ kbd_stop
 # can't be made in a headless compositor: the strokes are drawn with the virtual pointer,
 # which is how sway hands a pen to a client that doesn't bind the tablet protocol. The
 # stand-in recognizer reads the ink as w<strokes> (alternatives a<n>, b<n>).
-# Controls (surface px; the top row y 12..62 = screen y 57..107): the chips at x 13..207 (an alternative),
-# 217..411 (the read text), 421..615, the correction 625..675, keys 688..738, put away 738..788.
+# Controls (surface px; the top row y 12..62 = screen y 57..107): the chips at x 12..170 (an alternative),
+# 180..338 (the read text), 348..506, the correction 506..556, discard 566..616; Backspace
+# 638..688, keys 688..738, put away 738..788.
 HW=${HW:-python3 -u /src/test/fake-recognizer.py}
 pkbd() { $B/wvkbd/wvkbd-mobintl --im --hidden --strip -H 300 --no-popup -o -D -l full,special \
           --predictor "python3 -u /src/test/fake-predict.py" --handwriting "$HW" \
@@ -246,12 +247,30 @@ check "... the keys come" "grep -q '^Resize 800x350' /tmp/kbd.err && grep -q '^P
 ptr tap 40 675                      # the pen key in the strip
 sleep 0.5
 check "the pen key: the paper again (any field)" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 2 ]"
+ptr stroke 100,200 150,230 200,210 250,240
+sleep 1.2
+expect "a reading for discard" "$(preedit)" "w1"
+ptr tap 591 80                      # discard
+sleep 0.4
+expect "discard: the reading goes" "$(preedit)" ""
+expect "... nothing committed" "$(last)" "a2 w1 |6"
+ptr tap 663 80                      # Backspace
+sleep 0.4
+expect "the paper's Backspace: the character before the cursor" "$(last)" "a2 w1|5"
+ptr tap 713 80                      # keys
+sleep 0.5
+ptr move 400 800                    # the pen hovers over the keys, then the session says it is near
+kill -WINCH $KP; sleep 0.5
+check "the pen near over the keys: the keys stay" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 2 ] && keys_up"
+ptr move 400 300                    # over the app
+kill -WINCH $KP; sleep 0.5
+check "the pen near over the app: the paper" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 3 ]"
 ptr tap 763 80                      # put away
 sleep 0.5
 check "put away: all of it goes" "[ \"\$(lastview)\" = 3 ] && tail -3 /tmp/kbd.err | grep -q '^Paper hidden' && ! keys_up"
 field -c 0,0,2,20 -t "hi"
 pen_tap
-check "a pen tap into a field with text: the keys" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 2 ] && keys_up"
+check "a pen tap into a field with text: the keys" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 3 ] && keys_up"
 for p in "8 0 password" "9 0 pin" "0 128 sensitive_data" "0 64 hidden_text"; do
     set -- $p
     : > /tmp/hw.log
@@ -259,7 +278,7 @@ for p in "8 0 password" "9 0 pin" "0 128 sensitive_data" "0 64 hidden_text"; do
     pen_tap
     ptr stroke 100,200 150,230 200,210
     sleep 0.3
-    check "private $3: no paper" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 2 ]"
+    check "private $3: no paper" "[ \$(grep -c '^Paper 800x300' /tmp/kbd.err) = 3 ]"
     expect "private $3: nothing to the recognizer" "$(cat /tmp/hw.log)" ""
 done
 kbd_stop
@@ -290,7 +309,7 @@ if [ -x /tmp/b/glassine-handwriting ] && [ -d /models ]; then
     sleep 2.5
     check "real recognizer: a reading is pending" "[ -n \"\$(preedit)\" ]"
     p=$(preedit)
-    ptr tap 652 80                  # the correction: the reading in the edit field
+    ptr tap 531 80                  # the correction: the reading in the edit field
     sleep 0.4
     check "real recognizer: correcting shows the keys under the paper" "[ \"\$(lastview)\" = 2 ] && keys_up"
     ptr tap 740 975                 # Enter: Use

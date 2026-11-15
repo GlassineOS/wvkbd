@@ -657,6 +657,8 @@ int64_t osk_next_deadline(const struct osk *o)
     d = earliest(d, hw_next_deadline(&o->hw));
     if (o->pause_at) d = earliest(d, o->pause_at);
     if (o->paper_note_until) d = earliest(d, o->paper_note_until);
+    if (o->pbs_down) d = earliest(d, o->pbs_next);
+    if (o->near_at) d = earliest(d, o->near_at);
     if (o->need_read && o->paper_up) d = earliest(d, o->hw.restart_ms);
     if (o->sync_at) d = earliest(d, o->sync_at);
     if (o->pick_until) d = earliest(d, o->pick_until);
@@ -916,6 +918,14 @@ static void show_pending(struct osk *o)
     paper_draw(o);
 }
 
+/* the reading and the ink it was read from go; nothing reaches the field */
+static void discard_pending(struct osk *o, int64_t now)
+{
+    drop_first(o, o->pp.pending_n, now);
+    preedit(o, "");
+    readings_clear(o);
+}
+
 /* where the last word of s[0..n) starts: back over the spaces after it, then to the space
  * before it (a word as written: "3pm," goes as a whole) */
 static size_t written_word_start(const char *s, size_t n)
@@ -981,9 +991,7 @@ static void gesture(struct osk *o, char **f, int n, int64_t now)
     bool others = o->pp.ns > 0;
     if (!strcmp(kind, "scratch")) {     /* scratched out: the pending text is discarded */
         if (nc && o->pp.pending) {
-            drop_first(o, o->pp.pending_n, now);
-            preedit(o, "");
-            readings_clear(o);
+            discard_pending(o, now);
         } else if (nc) {
             remove_nums(o, cov, nc, now);
         }
@@ -1123,6 +1131,7 @@ static void paper_reset(struct osk *o)
     o->pp.note[0] = 0;
     o->paper_note_until = 0;
     o->confirm_id[0] = 0;
+    o->pbs_down = false;
 }
 
 bool osk_paper_open(struct osk *o, int64_t now)
@@ -1239,6 +1248,70 @@ static void fix_use(struct osk *o, int64_t now)
     refresh(o, now);
 }
 
+/* the paper's Backspace: the pending text's last character (the reading and its ink go
+ * with the last one), else, while correcting, the edit's, else the character before the
+ * cursor as the keys' Backspace. false: nothing left to delete (a repeat stops) */
+static bool paper_backspace(struct osk *o, int64_t now)
+{
+    if (!o->f.active) return false;
+    if (fixing(o)) {
+        if (!o->pp.fix[0]) return false;
+        char t[PAPER_TEXT_MAX];
+        snprintf(t, sizeof t, "%s", o->pp.fix);
+        t[tr_prev(t, strlen(t))] = 0;
+        fix_set(o, t);
+        return true;
+    }
+    if (o->pp.pending && o->pending_text[0]) {
+        size_t l = strlen(o->pending_text);
+        o->pending_text[tr_prev(o->pending_text, l)] = 0;
+        if (!o->pending_text[0]) {
+            discard_pending(o, now);
+            if (o->pp.ns) ask_read(o, now);
+        } else {
+            /* the edited reading is the only one left (the alternatives were for the ink) */
+            snprintf(o->pp.cand[0], sizeof o->pp.cand[0], "%s", o->pending_text);
+            for (int i = 1; i < PAPER_CANDS; i++) memset(o->pp.cand[i], 0, sizeof o->pp.cand[i]);
+            o->pp.ncand = 1;
+            o->want_read[0] = 0;        /* a reading still on its way is for the ink, not the edit */
+            preedit(o, o->pending_text);
+        }
+        paper_draw(o);
+        return true;
+    }
+    if (imf_backspace_bytes(&o->f)) {
+        if (o->queued || imf_unconfirmed(&o->f)) hold(o, OSK_OP_BACKSPACE, NULL, NULL, now);
+        else backspace_now(o, now);
+        return true;
+    }
+    if (o->queued) {
+        hold(o, OSK_OP_BACKSPACE, NULL, NULL, now);
+        return true;
+    }
+    if (o->f.surrounding) return false;     /* the field says it is empty before the cursor */
+    if (!o->ops->backspaces) return false;
+    o->ops->backspaces(o->d, 1);            /* a field without its text: the key */
+    imf_key_backspace(&o->f);
+    after_edit(o, now);
+    return true;
+}
+
+void osk_paper_release(struct osk *o)
+{
+    o->pbs_down = false;
+}
+
+void osk_pen_near(struct osk *o, int64_t now)
+{
+    if (!o->visible || o->paper_up || !want_recognizer(o)) return;
+    o->near_at = now + OSK_PEN_NEAR_MS;
+}
+
+void osk_pen_on_keys(struct osk *o, bool on)
+{
+    o->pen_on_keys = on;
+}
+
 bool osk_paper_tap(struct osk *o, int x, int y, int64_t now)
 {
     struct paper_item it;
@@ -1261,6 +1334,18 @@ bool osk_paper_tap(struct osk *o, int x, int y, int64_t now)
         set_view(o, OSK_VIEW_PAPER_KEYS);
         refresh(o, now);
         paper_draw(o);
+        break;
+    case PI_DROP:
+        if (!o->pp.pending || fixing(o)) break;
+        discard_pending(o, now);
+        if (o->pp.ns) ask_read(o, now);
+        paper_draw(o);
+        break;
+    case PI_BACK:
+        if (paper_backspace(o, now)) {
+            o->pbs_down = true;
+            o->pbs_next = now + OSK_REPEAT_DELAY_MS;
+        }
         break;
     case PI_USE:
         fix_use(o, now);
@@ -1288,7 +1373,16 @@ bool osk_key_capture(struct osk *o, uint32_t code, int64_t now)
 
 static void paper_tick(struct osk *o, int64_t now)
 {
+    if (o->near_at && now >= o->near_at) {
+        /* the pen came near: over the keys it is there to tap them, elsewhere to write */
+        o->near_at = 0;
+        if (o->visible && !o->paper_up && !o->pen_on_keys) osk_paper_open(o, now);
+    }
     if (!o->paper_up) return;
+    if (o->pbs_down && now >= o->pbs_next) {
+        if (paper_backspace(o, now)) o->pbs_next = now + OSK_REPEAT_MS;
+        else o->pbs_down = false;
+    }
     if (o->pause_at && now >= o->pause_at) {
         o->pause_at = 0;
         if (!o->pp.pending) show_pending(o);

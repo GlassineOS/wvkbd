@@ -1431,6 +1431,12 @@ void paper_draw_all(struct kbd *kb, struct drwsurf *ds)
         case PI_FIX:
             drw_draw_icon(ds, sc->text, t->x, t->y, t->w, t->h, DRW_ICON_PEN);
             break;
+        case PI_DROP:
+            drw_draw_icon(ds, sc->text, t->x, t->y, t->w, t->h, DRW_ICON_DROP);
+            break;
+        case PI_BACK:
+            drw_draw_icon(ds, sc->text, t->x, t->y, t->w, t->h, DRW_ICON_BACK);
+            break;
         case PI_KEYS:
             drw_draw_icon(ds, sc->text, t->x, t->y, t->w, t->h, DRW_ICON_KEYS);
             break;
