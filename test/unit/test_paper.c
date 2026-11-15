@@ -204,16 +204,27 @@ static void test_geometry(void)
     paper_size(&p, 800, 300);
     struct paper_item it[PAPER_ITEMS];
     int n = paper_items(&p, it);
-    CHECK_INT("geometry: the bare paper has the two controls", n, 2);
-    CHECK("geometry: keys then put away, in the top right corner",
-          it[0].kind == PI_KEYS && it[1].kind == PI_CLOSE && it[1].x + it[1].w <= 800 && it[1].y < 20);
+    CHECK_INT("geometry: the bare paper has the three controls", n, 3);
+    CHECK("geometry: Backspace, keys, put away, in the top right corner",
+          it[0].kind == PI_BACK && it[1].kind == PI_KEYS && it[2].kind == PI_CLOSE &&
+          it[0].x + it[0].w <= it[1].x && it[2].x + it[2].w <= 800 && it[2].y < 20);
     p.pending = true;
     p.ncand = 3;
     n = paper_items(&p, it);
-    CHECK_INT("geometry: pending: three chips, the pencil, the controls", n, 6);
+    CHECK_INT("geometry: pending: three chips, the pencil, discard, the controls", n, 8);
     CHECK("geometry: the best reading in the middle", it[0].cand == 1 && it[1].cand == 0 && it[2].cand == 2);
-    CHECK("geometry: the pencil after the chips", it[3].kind == PI_FIX && it[3].x > it[2].x);
-    CHECK("geometry: the row stays clear of the controls", it[3].x + it[3].w <= it[4].x);
+    CHECK("geometry: the pencil after the chips", it[3].kind == PI_FIX && it[3].x > it[2].x + it[2].w);
+    CHECK("geometry: discard after the pencil", it[4].kind == PI_DROP && it[4].x >= it[3].x + it[3].w);
+    CHECK("geometry: the row stays clear of the controls", it[4].x + it[4].w <= it[5].x && it[5].kind == PI_BACK);
+    paper_size(&p, 360, 200);           /* a narrow window: still apart */
+    n = paper_items(&p, it);
+    bool apart = true;
+    for (int a = 0; a < n; a++)
+        for (int b = a + 1; b < n; b++)
+            if (it[a].x < it[b].x + it[b].w && it[b].x < it[a].x + it[a].w && it[a].y < it[b].y + it[b].h && it[b].y < it[a].y + it[a].h)
+                apart = false;
+    CHECK("geometry: narrow: no two items overlap", apart && it[0].x >= 0);
+    paper_size(&p, 800, 300);
     p.fixing = true;
     n = paper_items(&p, it);
     CHECK("geometry: correcting: the edit field and Use", it[0].kind == PI_EDIT && it[1].kind == PI_USE);
@@ -460,6 +471,132 @@ static void test_writing(void)
     osk_finish(&o);
 }
 
+static void tap(enum paper_kind kind)
+{
+    int x, y;
+    if (item(kind, &x, &y)) osk_paper_tap(&o, x, y, now_ms());
+    osk_paper_release(&o);
+}
+
+/* the paper's Backspace and discard controls (spec 006 FR-010a, FR-012a) */
+static void test_controls(void)
+{
+    int x, y;
+    fresh("ok", fake);
+    focus(IM_P_NORMAL, 0, "ab", true);
+    osk_paper_open(&o, now_ms());
+    run(&o, 1);
+    osk_paper_size(&o, 800, 300);
+
+    /* no reading: the character before the cursor, as the keys' Backspace */
+    tap(PI_BACK);
+    run(&o, 50);
+    CHECK_STR("Backspace, no reading: the character before the cursor", app, "a");
+    CHECK_INT("... through the field, not a key", backspaces, 0);
+
+    /* a reading: its last character first, the alternatives go */
+    write_letter(100);
+    write_letter(160);
+    run(&o, PAUSE + 100);
+    CHECK_STR("a reading pending", pre, "w2");
+    tap(PI_BACK);
+    CHECK_STR("Backspace, a reading: its last character goes", pre, "w");
+    CHECK("... still pending, the edited text the only reading", o.pp.pending && o.pp.ncand == 1 && !strcmp(o.pp.cand[0], "w"));
+    CHECK_STR("... the field's text unchanged", app, "a");
+    CHECK_INT("... the ink stays", o.pp.ns, 2);
+    tap(PI_BACK);
+    CHECK("Backspace, the last character: the reading and its ink go", !pre[0] && !o.pp.pending && o.pp.ns == 0);
+    CHECK_STR("... nothing committed", app, "a");
+    CHECK_INT("... no lesson", log_count("confirm"), 0);
+
+    /* an edited reading commits as edited, without a lesson */
+    write_letter(100);
+    write_letter(160);
+    run(&o, PAUSE + 100);
+    tap(PI_BACK);
+    write_letter(300);                  /* writing on commits it */
+    run(&o, 100);
+    CHECK_STR("an edited reading commits as edited", app, "aw ");
+    CHECK_INT("... no lesson", log_count("confirm"), 0);
+    run(&o, PAUSE + 100);
+
+    /* discard: the reading and its ink go, nothing reaches the field */
+    CHECK("discard shows with a reading", o.pp.pending && item(PI_DROP, &x, &y));
+    tap(PI_DROP);
+    CHECK("discard: no pending text, no ink", !pre[0] && !o.pp.pending && o.pp.ns == 0);
+    CHECK_STR("discard: the field unchanged", app, "aw ");
+    CHECK("discard: the paper stays", o.paper_up && view == OSK_VIEW_PAPER);
+    CHECK("discard: not there without a reading", !item(PI_DROP, &x, &y));
+
+    /* held: repeats after the delay, stops when lifted */
+    snprintf(app, sizeof app, "%s", "abcdefghij");
+    osk_im_surrounding(&o, app, strlen(app), strlen(app));
+    osk_im_done(&o, now_ms());
+    item(PI_BACK, &x, &y);
+    osk_paper_tap(&o, x, y, now_ms());
+    run_exact(&o, OSK_REPEAT_DELAY_MS + 3 * OSK_REPEAT_MS - 20);
+    osk_paper_release(&o);
+    run_exact(&o, 300);                 /* deletes held for the app's report go out */
+    size_t left = strlen(app);
+    run_exact(&o, 300);
+    CHECK("Backspace held: repeats", left <= 8);
+    CHECK("... stops when lifted", strlen(app) == left);
+    osk_finish(&o);
+
+    /* a field without its text: Backspace as a key */
+    fresh("ok", fake);
+    focus(IM_P_NORMAL, 0, "xy", false);
+    osk_paper_open(&o, now_ms());
+    run(&o, 1);
+    osk_paper_size(&o, 800, 300);
+    tap(PI_BACK);
+    CHECK("no surrounding text: Backspace as a key", backspaces == 1 && !strcmp(app, "x"));
+    osk_finish(&o);
+
+    /* the pen comes near with the keys up: the paper, unless it is over the keys */
+    fresh("ok", fake);
+    focus(IM_P_NORMAL, 0, "hello", true);
+    osk_visible(&o, true, now_ms());
+    osk_pen_near(&o, now_ms());
+    run_exact(&o, OSK_PEN_NEAR_MS / 2);
+    CHECK("pen near: not at once", !o.paper_up);
+    run_exact(&o, OSK_PEN_NEAR_MS);
+    CHECK("pen near, not over the keys: the paper, also in a field with text", o.paper_up && view == OSK_VIEW_PAPER);
+    osk_pen_near(&o, now_ms());         /* again while it is up: it stays */
+    run_exact(&o, 2 * OSK_PEN_NEAR_MS);
+    CHECK("pen near again: the paper stays", o.paper_up && view == OSK_VIEW_PAPER);
+    osk_paper_end(&o, now_ms());
+    view = OSK_VIEW_KEYS;
+    osk_pen_near(&o, now_ms());
+    osk_pen_on_keys(&o, true);          /* it hovers over the keys: there to tap one */
+    run_exact(&o, 2 * OSK_PEN_NEAR_MS);
+    CHECK("pen near over the keys: the keys stay", !o.paper_up && view == OSK_VIEW_KEYS);
+    osk_pen_on_keys(&o, false);
+    osk_visible(&o, false, now_ms());
+    osk_pen_near(&o, now_ms());
+    run_exact(&o, 2 * OSK_PEN_NEAR_MS);
+    CHECK("pen near, keyboard hidden: nothing", !o.paper_up);
+    osk_finish(&o);
+
+    fresh("ok", fake);
+    focus(IM_P_PASSWORD, 0, "", true);
+    osk_visible(&o, true, now_ms());
+    osk_pen_near(&o, now_ms());
+    run_exact(&o, 2 * OSK_PEN_NEAR_MS);
+    CHECK("pen near, a private field: no paper", !o.paper_up && log_size() == 0);
+    osk_finish(&o);
+
+    conf("handwriting = off\n");
+    fresh("ok", fake);
+    focus(IM_P_NORMAL, 0, "", true);
+    osk_visible(&o, true, now_ms());
+    osk_pen_near(&o, now_ms());
+    run_exact(&o, 2 * OSK_PEN_NEAR_MS);
+    CHECK("pen near, handwriting off: no paper", !o.paper_up);
+    osk_finish(&o);
+    conf("handwriting_pause = 200\n");
+}
+
 static void test_gestures(void)
 {
     int strike[] = { 60, 160, 300, 161, 560, 160 };
@@ -602,6 +739,7 @@ int main(int argc, char **argv)
     test_geometry();
     test_client();
     test_writing();
+    test_controls();
     test_gestures();
     test_private();
     unlink(logpath);

@@ -242,6 +242,32 @@ drw_draw_icon(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
         cairo_rectangle(c, cx - s * 0.45, cy + s * 0.3, s * 0.9, s * 0.1);
         cairo_fill(c);
         break;
+    case DRW_ICON_BACK:         /* Backspace: a tag pointing left with an x in it */
+        cairo_move_to(c, cx - s, cy);
+        cairo_line_to(c, cx - s * 0.45, cy - s * 0.6);
+        cairo_line_to(c, cx + s, cy - s * 0.6);
+        cairo_line_to(c, cx + s, cy + s * 0.6);
+        cairo_line_to(c, cx - s * 0.45, cy + s * 0.6);
+        cairo_close_path(c);
+        cairo_stroke(c);
+        cairo_move_to(c, cx - s * 0.05, cy - s * 0.3);
+        cairo_line_to(c, cx + s * 0.55, cy + s * 0.3);
+        cairo_move_to(c, cx + s * 0.55, cy - s * 0.3);
+        cairo_line_to(c, cx - s * 0.05, cy + s * 0.3);
+        cairo_stroke(c);
+        break;
+    case DRW_ICON_DROP:         /* discard the reading: a word (lines) struck out */
+        cairo_rectangle(c, cx - s * 0.8, cy - s * 0.55, s * 1.6, s * 1.1);
+        cairo_stroke(c);
+        cairo_move_to(c, cx - s * 0.5, cy - s * 0.15);
+        cairo_line_to(c, cx + s * 0.5, cy - s * 0.15);
+        cairo_move_to(c, cx - s * 0.5, cy + s * 0.2);
+        cairo_line_to(c, cx + s * 0.2, cy + s * 0.2);
+        cairo_stroke(c);
+        cairo_move_to(c, cx - s * 0.95, cy + s * 0.75);
+        cairo_line_to(c, cx + s * 0.95, cy - s * 0.75);
+        cairo_stroke(c);
+        break;
     case DRW_ICON_CLOSE:        /* an X */
         cairo_move_to(c, cx - s * 0.6, cy - s * 0.6);
         cairo_line_to(c, cx + s * 0.6, cy + s * 0.6);

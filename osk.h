@@ -38,6 +38,7 @@ enum osk_view { OSK_VIEW_KEYS, OSK_VIEW_PAPER, OSK_VIEW_PAPER_KEYS, OSK_VIEW_HID
 #define OSK_NOTE_MS 2600          /* the note after a removal */
 #define OSK_REPEAT_DELAY_MS 500   /* a held Backspace repeats ... */
 #define OSK_REPEAT_MS 80          /* ... this often */
+#define OSK_PEN_NEAR_MS 150       /* the pen came near: where it is (over the keys or not) by then */
 #define OSK_SYNC_MS 30            /* after a late report: the empty commit asking for a fresh one */
 #define OSK_PICK_WAIT_MS 300      /* a pick over a selection: its second step waits this long */
 #define OSK_QUEUE_MAX 64          /* edits held while a delete waits for the app's text */
@@ -126,6 +127,10 @@ struct osk {
     int64_t paper_note_until;
     char last_hw[PAPER_TEXT_MAX];  /* the text the paper committed last (strike, no surrounding) */
     char pending_text[PAPER_TEXT_MAX];  /* the reading in the field as pending text */
+    bool pbs_down;              /* the paper's Backspace is held */
+    int64_t pbs_next;
+    int64_t near_at;            /* the pen came near: the paper then, unless it is over the keys (0: none) */
+    bool pen_on_keys;           /* the pointer (the pen hovering) is over the keys */
 };
 
 void osk_init(struct osk *o, const struct osk_ops *ops, void *d, char **predictor,
@@ -180,6 +185,12 @@ void osk_pen_motion(struct osk *o, double x, double y, double pressure, uint32_t
 void osk_pen_up(struct osk *o, int64_t now);
 /* a tap (a finger, or the pen on a control): true when it hit a control */
 bool osk_paper_tap(struct osk *o, int x, int y, int64_t now);
+/* that finger or pen lifted (a held Backspace stops) */
+void osk_paper_release(struct osk *o);
+/* the pen came into range somewhere (the session tells): with the keys up, the paper
+ * opens after OSK_PEN_NEAR_MS unless the pen is over the keys by then (osk_pen_on_keys) */
+void osk_pen_near(struct osk *o, int64_t now);
+void osk_pen_on_keys(struct osk *o, bool on);
 /* a key without text while correcting (Enter uses the text): true when taken */
 bool osk_key_capture(struct osk *o, uint32_t code, int64_t now);
 
