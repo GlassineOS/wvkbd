@@ -283,6 +283,31 @@ for p in "8 0 password" "9 0 pin" "0 128 sensitive_data" "0 64 hidden_text"; do
 done
 kbd_stop
 
+# a URL field takes searches too: a space after plain words, none once it looks like an
+# address; the paper's space goes again before a reading that starts an address part
+export FAKE_TEXTS="1=apple,2=banana,3=example,4=.com"
+url_words() {   # purpose, then the stroke counts to write, each committed as read
+    field -c 0,0,2,20 -p $1; shift
+    pen_tap
+    for c in "$@"; do
+        i=0; while [ $i -lt $c ]; do ptr stroke $((100 + i * 100)),200 $((140 + i * 100)),230 $((170 + i * 100)),210; i=$((i + 1)); done
+        sleep 1.2
+        ptr tap 259 80                  # the read text: committed as it was read
+        sleep 0.4
+    done
+    ptr tap 763 80                      # put away: the container's sway crashes when a field goes away under an open paper
+    sleep 0.4
+}
+pkbd
+url_words 5 1 2
+expect "url field, a search: a space after each word" "$(last)" "apple banana |13"
+url_words 5 3 4
+expect "url field, an address: the space goes again" "$(last)" "example.com|11"
+url_words 6 1 2
+expect "email field: no space" "$(last)" "applebanana|11"
+kbd_stop
+unset FAKE_TEXTS
+
 # a missing recognizer: the paper takes ink, typing goes on
 HW=/nonexistent/glassine-handwriting pkbd
 field -c 0,0,2,20

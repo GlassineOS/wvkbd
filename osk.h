@@ -126,6 +126,7 @@ struct osk {
     char confirm_id[16];        /* the lesson whose answer shows the note */
     int64_t paper_note_until;
     char last_hw[PAPER_TEXT_MAX];  /* the text the paper committed last (strike, no surrounding) */
+    bool hw_space;              /* ... and it ended in a space the paper added (a search in a URL field) */
     char pending_text[PAPER_TEXT_MAX];  /* the reading in the field as pending text */
     bool pbs_down;              /* the paper's Backspace is held */
     int64_t pbs_next;
