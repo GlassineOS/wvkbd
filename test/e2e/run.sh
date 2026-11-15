@@ -299,7 +299,8 @@ kbd_stop
 # the real recognizer with a trained model (HW_SRC and HW_MODELS given to test.sh):
 # its reading lands as pending text, Use of the correction commits with a lesson
 if [ -x /tmp/b/glassine-handwriting ] && [ -d /models ]; then
-    export GLASSINE_HANDWRITING_MODELS=/models XDG_CONFIG_HOME=/tmp/hwcfg XDG_DATA_HOME=/tmp/hwdata
+    export GLASSINE_HANDWRITING_MODELS=/models XDG_CONFIG_HOME=/tmp/hwcfg XDG_DATA_HOME=/tmp/hwdata \
+        GLASSINE_PREDICT_MODELS=/tmp/nowords GLASSINE_HANDWRITING_FIT_OK=2
     HW=/tmp/b/glassine-handwriting pkbd
     field -c 0,0,2,20
     pen_tap
@@ -315,6 +316,23 @@ if [ -x /tmp/b/glassine-handwriting ] && [ -d /models ]; then
     ptr tap 740 975                 # Enter: Use
     sleep 1
     expect "real recognizer: Use commits the reading" "$(last)" "$p |$(( $(printf '%s' "$p" | wc -m) + 1 ))"
+    # the lessons as samples in the store: source, text, and the candidate it was (pick)
+    lesson() { python3 -c 'import json,sys
+l=[json.loads(x) for x in open(sys.argv[1]).read().replace("\0","\n").splitlines() if x.startswith("{")]
+s=l[-1] if l else {}; k=s.get("pick") or {}
+print(len(l), s.get("source"), k.get("rank"), k.get("from"), s.get("text"))' /tmp/hwdata/glassine/handwriting/samples.jsonl 2>/dev/null; }
+    sleep 0.5
+    expect "real recognizer: Use keeps a sample: the reading as it was, candidate 1" "$(lesson)" "1 confirmed 1 ink $p"
+    # an alternative picked: a sample with its place; the fit check is for picks the words
+    # put there (none here: no word model), so a check nothing passes still keeps it
+    ptr stroke 120,145 118,185 116,225 115,245 125,247
+    ptr stroke 170,215 155,225 152,240 165,249 180,240 182,225 170,215
+    sleep 2.5
+    p=$(preedit)
+    ptr tap 100 80                  # the left chip: an alternative
+    sleep 1
+    check "real recognizer: a picked alternative keeps a sample, its place 2 or more" \
+        "lesson | grep -Eq '^2 confirmed [2-9] (beam|ink) '"
     check "real recognizer: still running" "kill -0 $KP"
     kbd_stop
 else
