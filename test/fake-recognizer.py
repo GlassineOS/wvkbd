@@ -11,7 +11,8 @@
 # than 1.2 is a strike (covering the strokes whose middle lies under it), a stroke that
 # turns back on itself four times a scratch (covering the strokes its box overlaps), three
 # points with the middle one highest a caret (before the character after the strokes left
-# of it).
+# of it). FAKE_TEXTS ("1=apple,2=banana"): the reading for that many strokes instead of
+# w<count>.
 import os, sys, time
 mode = os.environ.get("FAKE_MODE", "ok")
 log = os.environ.get("FAKE_LOG")
@@ -21,6 +22,7 @@ out = sys.stdout
 sessions = {}               # name -> {num: points}
 counter = {}                # name -> next stroke number
 prev_read = None
+texts = dict(kv.split("=", 1) for kv in os.environ.get("FAKE_TEXTS", "").split(",") if "=" in kv)
 
 
 def say(*f):
@@ -139,7 +141,7 @@ while True:
         else:
             c = len(sessions[s])
             align = ";".join(str(k) for k in sorted(sessions[s]))
-            say("read", rid, "text", "3", "w%d" % c, "-0.1", align, "a%d" % c, "-1.0", align, "b%d" % c, "-2.0", align)
+            say("read", rid, "text", "3", texts.get(str(c), "w%d" % c), "-0.1", align, "a%d" % c, "-1.0", align, "b%d" % c, "-2.0", align)
     elif verb == "remove":
         s = f[2]
         gone = 0

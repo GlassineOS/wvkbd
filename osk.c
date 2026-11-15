@@ -870,20 +870,42 @@ static void drop_first(struct osk *o, int n, int64_t now)
         hw_request(&o->hw, now, NULL, "remove", o->sid, list, (char *)NULL);
 }
 
-/* text into the field (the pending text goes) */
-static void put_text(struct osk *o, const char *text, int64_t now)
+/* text into the field after del bytes before the cursor go (the pending text goes) */
+static void put_text(struct osk *o, size_t del, const char *text, int64_t now)
 {
     if (!o->f.active) return;
-    if (o->ops->im_preedit) o->ops->im_preedit(o->d, 0, text, "");
-    if (*text) {
-        imf_edit(&o->f, 0, text, now);
-        snprintf(o->last_hw, sizeof o->last_hw, "%s", text);
-    }
+    if (o->ops->im_preedit) o->ops->im_preedit(o->d, (uint32_t)del, text, "");
+    if (del || *text) imf_edit(&o->f, del, text, now);
+    if (*text) snprintf(o->last_hw, sizeof o->last_hw, "%s", text);
+    o->hw_space = false;
 }
 
-/* the reading goes into the field: text, a space after it (not in an address); source:
- * the lesson (picked, corrected, confirmed; NULL: none: a reading committed as it was
- * read teaches nothing). The ink it was read from clears; ink written after it stays. */
+static bool starts_with(const char *s, const char *p)
+{
+    for (; *p; s++, p++) if ((*s | 0x20) != *p) return false;
+    return true;
+}
+
+/* a URL field also takes searches (a browser's address bar): the field's text b[0..n)
+ * with text after it looks like an address once it has a . / : or @, or starts with a
+ * scheme ("http") or "www"; plain words are a search */
+static bool url_address(const char *b, size_t n, const char *text)
+{
+    char all[IM_VIEW_MAX + PAPER_TEXT_MAX + 2];
+    size_t i = 0;
+    while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n')) i++;
+    snprintf(all, sizeof all, "%.*s%s", (int)(n - i), b + i, text);
+    bool addr = strpbrk(all, "./:@") || starts_with(all, "http") || starts_with(all, "www");
+    memset(all, 0, sizeof all);
+    return addr;
+}
+
+/* the reading goes into the field: text, a space after it (not in an email field, not in
+ * a URL field once its text looks like an address: url_address); source: the lesson
+ * (picked, corrected, confirmed; NULL: none: a reading committed as it was read teaches
+ * nothing). A reading that starts with . / : or @ right after the space the paper put
+ * after a search in a URL field ("example", then ".com") takes that space back. The ink
+ * it was read from clears; ink written after it stays. */
 static void commit_reading(struct osk *o, const char *text, const char *source, int64_t now)
 {
     int n = o->pp.pending ? o->pp.pending_n : o->pp.ns;
@@ -894,10 +916,17 @@ static void commit_reading(struct osk *o, const char *text, const char *source, 
             o->confirm_id[0] = 0;
     }
     char t[PAPER_TEXT_MAX + 2];
-    size_t tl = strlen(text);
-    bool space = tl && text[tl - 1] != ' ' && o->f.purpose != IM_P_EMAIL && o->f.purpose != IM_P_URL;
+    size_t tl = strlen(text), len, del = 0;
+    const char *b = imf_before(&o->f, &len);
+    bool url = o->f.purpose == IM_P_URL, space = tl && text[tl - 1] != ' ' && o->f.purpose != IM_P_EMAIL;
+    if (url && *text && strchr("./:@", text[0]) && o->hw_space && len && b[len - 1] == ' ') {
+        size_t hl = strlen(o->last_hw);
+        if (hl <= len && !memcmp(b + len - hl, o->last_hw, hl)) del = 1;
+    }
+    if (url && space) space = !url_address(b, len - del, text);
     snprintf(t, sizeof t, "%s%s", text, space ? " " : "");
-    put_text(o, t, now);
+    put_text(o, del, t, now);
+    o->hw_space = url && space;
     memset(t, 0, sizeof t);
     drop_first(o, n, now);
     readings_clear(o);
@@ -1015,7 +1044,7 @@ static void gesture(struct osk *o, char **f, int n, int64_t now)
     } else if (!strcmp(kind, "caret")) { /* a space */
         int k = f[7][0] == '@' ? atoi(f[7] + 1) : -1;
         if (!others) {
-            put_text(o, " ", now);
+            put_text(o, 0, " ", now);
             after_edit(o, now);
         } else if (o->pp.pending) {
             char t[PAPER_TEXT_MAX + 2];
