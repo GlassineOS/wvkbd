@@ -329,6 +329,7 @@ wl_touch_up(void *data, struct wl_touch *wl_touch, uint32_t serial,
 {
     if (id >= 0 && id < 32 && (paper_touches & (1u << id))) {
         paper_touches &= ~(1u << id);
+        if (!paper_touches) osk_paper_release(&osk);
         return;
     }
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
@@ -395,6 +396,7 @@ wl_pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
     cur_x = wl_fixed_to_int(surface_x);
     cur_y = wl_fixed_to_int(surface_y);
     ptr_surface = surface;
+    osk_pen_on_keys(&osk, surface && (surface == draw_surf.surf || surface == popup_draw_surf.surf));
     if (keyboard.debug && surface == paper_surf) fprintf(stderr, "Paper: pointer in %d,%d\n", cur_x, cur_y);
 }
 
@@ -407,8 +409,10 @@ wl_pointer_leave(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
         paper_writing = false;
         osk_pen_up(&osk, monotime());
     }
+    if (ptr_surface && ptr_surface == paper_surf) osk_paper_release(&osk);
     if (keyboard.debug && ptr_surface && ptr_surface == paper_surf) fprintf(stderr, "Paper: pointer out\n");
     ptr_surface = NULL;
+    osk_pen_on_keys(&osk, false);
 }
 
 void
@@ -462,6 +466,7 @@ wl_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                 osk_pen_up(&osk, monotime());
                 if (keyboard.debug) fprintf(stderr, "Paper: pen up (%d strokes)\n", osk.pp.ns);
             }
+            if (paper_ctl) osk_paper_release(&osk);
             paper_ctl = false;
         }
         return;
@@ -1291,6 +1296,16 @@ session_show(void)
     show();
 }
 
+/* glassine: the session saw the pen come into range (SIGWINCH; ignored by default, so a
+ * keyboard without this takes no harm): with the keys up, the paper, unless the pen turns
+ * out to be over the keys (osk.c, osk_pen_near) */
+static void
+pen_near(void)
+{
+    if (keyboard.osk && layer_surface && !hidden && !osk.paper_up)
+        osk_pen_near(keyboard.osk, monotime());
+}
+
 void
 toggle_visibility()
 {
@@ -1833,6 +1848,7 @@ main(int argc, char **argv)
     sigaddset(&signal_mask, SIGUSR1);
     sigaddset(&signal_mask, SIGUSR2);
     sigaddset(&signal_mask, SIGRTMIN);
+    sigaddset(&signal_mask, SIGWINCH);
     sigaddset(&signal_mask, SIGPIPE);
     if (sigprocmask(SIG_BLOCK, &signal_mask, NULL) == -1) {
         die("Failed to disable handled signals: %d\n", errno);
@@ -1884,6 +1900,8 @@ main(int argc, char **argv)
                 session_show();
             else if (si.ssi_signo == SIGRTMIN)
                 toggle_visibility();
+            else if (si.ssi_signo == SIGWINCH)
+                pen_near();
             else if (si.ssi_signo == SIGPIPE)
                 pipewarn();
         }
