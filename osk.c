@@ -870,14 +870,17 @@ static void drop_first(struct osk *o, int n, int64_t now)
         hw_request(&o->hw, now, NULL, "remove", o->sid, list, (char *)NULL);
 }
 
-/* text into the field after del bytes before the cursor go (the pending text goes) */
+/* text into the field after del bytes before the cursor go (the pending text goes). With
+ * a deletion, the pending text goes in an edit of its own first: Chromium's address bar
+ * drops a deletion that comes with its composition's end */
 static void put_text(struct osk *o, size_t del, const char *text, int64_t now)
 {
     if (!o->f.active) return;
+    if (del && o->ops->im_preedit) o->ops->im_preedit(o->d, 0, "", "");
     if (o->ops->im_preedit) o->ops->im_preedit(o->d, (uint32_t)del, text, "");
     if (del || *text) imf_edit(&o->f, del, text, now);
     if (*text) snprintf(o->last_hw, sizeof o->last_hw, "%s", text);
-    o->hw_space = false;
+    o->hw_space = 0;
 }
 
 static bool starts_with(const char *s, const char *p)
@@ -900,12 +903,15 @@ static bool url_address(const char *b, size_t n, const char *text)
     return addr;
 }
 
-/* the reading goes into the field: text, a space after it (not in an email field, not in
- * a URL field once its text looks like an address: url_address); source: the lesson
- * (picked, corrected, confirmed; NULL: none: a reading committed as it was read teaches
- * nothing). A reading that starts with . / : or @ right after the space the paper put
- * after a search in a URL field ("example", then ".com") takes that space back. The ink
- * it was read from clears; ink written after it stays. */
+/* the reading goes into the field: a space before it where one is missing (see lead), text, a space after it (not in an email field, not in
+ * a URL field once its text looks like an address: url_address; with a selection, the
+ * text before it, which the reading replaces); source: the lesson (picked, corrected,
+ * confirmed; NULL: none: a reading committed as it was read teaches nothing). A reading
+ * that starts with . / : or @ right after the space the paper put after a search in a
+ * URL field ("example", then ".com"), with nothing edited since, takes that space back;
+ * not with a selection (apps resolve a deletion around one differently, see pick) or
+ * without the field's text (the deletion needs it). The ink it was read from clears; ink
+ * written after it stays. */
 static void commit_reading(struct osk *o, const char *text, const char *source, int64_t now)
 {
     int n = o->pp.pending ? o->pp.pending_n : o->pp.ns;
@@ -918,15 +924,32 @@ static void commit_reading(struct osk *o, const char *text, const char *source, 
     char t[PAPER_TEXT_MAX + 2];
     size_t tl = strlen(text), len, del = 0;
     const char *b = imf_before(&o->f, &len);
+    bool sel = o->f.surrounding && o->f.selection;
+    size_t end = sel ? o->f.sel_start : len;
     bool url = o->f.purpose == IM_P_URL, space = tl && text[tl - 1] != ' ' && o->f.purpose != IM_P_EMAIL;
-    if (url && *text && strchr("./:@", text[0]) && o->hw_space && len && b[len - 1] == ' ') {
+    if (url && *text && strchr("./:@", text[0]) && o->hw_space == len && len && !sel && o->f.surrounding &&
+        b[len - 1] == ' ') {
         size_t hl = strlen(o->last_hw);
         if (hl <= len && !memcmp(b + len - hl, o->last_hw, hl)) del = 1;
     }
-    if (url && space) space = !url_address(b, len - del, text);
-    snprintf(t, sizeof t, "%s%s", text, space ? " " : "");
+    if (url && space) space = !url_address(b, end - del, text);
+    /* right after a word, a number or punctuation that ends something, a reading that
+     * starts with a letter or digit gets a space before it, in prose and name fields and
+     * in a URL field's search; not after a space (the caret's, too), a bracket or quote
+     * that opens, a dash or a slash */
+    bool lead = false;
+    int pu = o->f.purpose;
+    if (*text && !del && end && (pu == IM_P_NORMAL || pu == IM_P_ALPHA || pu == IM_P_NAME || pu == IM_P_URL)) {
+        uint32_t c, f;
+        size_t p = tr_prev(b, end);
+        tr_dec(b + p, end - p, &c);
+        tr_dec(text, tl, &f);
+        lead = (tr_letter(c) || (c >= '0' && c <= '9') || after_space(c)) && (tr_letter(f) || (f >= '0' && f <= '9'));
+        if (lead && pu == IM_P_URL) lead = !url_address(b, end, text);
+    }
+    snprintf(t, sizeof t, "%s%s%s", lead ? " " : "", text, space ? " " : "");
     put_text(o, del, t, now);
-    o->hw_space = url && space;
+    if (url && space) imf_before(&o->f, &o->hw_space);
     memset(t, 0, sizeof t);
     drop_first(o, n, now);
     readings_clear(o);
