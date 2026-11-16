@@ -123,6 +123,7 @@ struct osk {
     int64_t t0;                 /* the time origin of the session's points */
     double per_mm;              /* the paper's px per mm (osk_paper_scale; 0: not known, em) */
     double session_per_mm;      /* ... as the session was begun with */
+    int rate;                   /* the pen's report rate (points per second, from the ink; 0: not known) */
     int area_w, area_h;         /* the paper's size the session's area was sent for */
     char want_read[16];         /* the newest read ("": none waiting) */
     bool need_read;             /* a read is owed (the recognizer was away) */
@@ -193,6 +194,14 @@ void osk_paper_scale(struct osk *o, double per_mm);
 /* the pen on the paper (surface px; pressure 0..1, -1 unknown; t ms of the event) */
 void osk_pen_down(struct osk *o, double x, double y, double pressure, uint32_t t, int64_t now);
 void osk_pen_motion(struct osk *o, double x, double y, double pressure, uint32_t t);
+/* ... with the tilt (degrees; NAN: none; kept only with a pressure) */
+void osk_pen_down_tilt(struct osk *o, double x, double y, double pressure, double tx, double ty, uint32_t t,
+                       int64_t now);
+void osk_pen_motion_tilt(struct osk *o, double x, double y, double pressure, double tx, double ty, uint32_t t);
+/* the strokes on the paper */
+int osk_paper_strokes(const struct osk *o);
+/* the session's UNITS: device:PER_MM[:RATE] with the scale known, else em */
+void osk_units_text(double per_mm, int rate, char *out, size_t n);
 void osk_pen_up(struct osk *o, int64_t now);
 /* a tap (a finger, or the pen on a control): true when it hit a control */
 bool osk_paper_tap(struct osk *o, int x, int y, int64_t now);

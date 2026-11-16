@@ -21,13 +21,14 @@
 #define PAPER_POINTS_MAX 20000    /* points of one stroke kept (a longer one ends there) */
 #define PAPER_STROKES_MAX 512     /* strokes on the paper (more: the oldest pending text commits) */
 
-struct paper_pt { float x, y, p; int32_t t; };
+struct paper_pt { float x, y, p, tx, ty; int32_t t; };   /* tilt in degrees */
 
 struct paper_stroke {
     struct paper_pt *pt;
     int n, cap;
     int num;                      /* the recognizer's number for it (-1: not known yet) */
     bool pressure;                /* its points have a pressure */
+    bool tilt;                    /* ... and a tilt (only with a pressure, as the contract has it) */
     char id[16];                  /* the id of its stroke request ("": not sent) */
 };
 
@@ -73,6 +74,7 @@ void paper_size(struct paper *p, int w, int h);
 /* the ink */
 struct paper_stroke *paper_stroke_new(struct paper *p);
 bool paper_point(struct paper_stroke *s, float x, float y, float pressure, int32_t t);
+bool paper_point_tilt(struct paper_stroke *s, float x, float y, float pressure, float tx, float ty, int32_t t);
 void paper_remove(struct paper *p, int index);
 void paper_clear(struct paper *p);
 int paper_find_num(const struct paper *p, int num);     /* the stroke with that number (-1) */
@@ -101,10 +103,19 @@ double paper_unit(const struct paper *p, double per_mm);
 double paper_line(const struct paper *p);
 /* the area request's value: "X0,Y0,X1,Y1,LINE,ROT,BASE" in the units of paper_unit */
 void paper_area_text(const struct paper *p, double per_mm, int rot, char *out, size_t n);
-/* a stroke's points as the contract writes them ("x,y,t[,p] ..."), in the units of
- * paper_unit. Returns a malloc'd string, its length in *len. */
+/* a stroke's points as the contract writes them ("x,y,t[,p[,tx,ty]] ..."; tilt when the
+ * stroke has it), in the units of paper_unit. Returns a malloc'd string, its length in *len. */
 char *paper_points_text(const struct paper *p, const struct paper_stroke *s, bool pressure, double per_mm,
                         size_t *len);
+
+/* the ink's width (surface px) at a pressure, as the compositor's live preview draws it
+ * (the paper's brush: PAPER_INK_MIN times the base width at no pressure to PAPER_INK_MAX
+ * at full, linear); pressure < 0: not known, the base width */
+#define PAPER_INK_MAX 1.4
+double paper_ink_at(double base, double pressure);
+/* the report rate of the ink on the paper (points per second: 1000 over the median step
+ * of time, as the samples app reckons it; 0 with fewer than 8 steps) */
+int paper_rate(const struct paper *p);
 
 #define PAPER_NOTE_LEARNED "Noted. This paper learns your handwriting, on this device only."
 

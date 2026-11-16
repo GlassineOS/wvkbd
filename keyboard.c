@@ -1355,13 +1355,32 @@ double paper_ink_width(const struct paper *p)
     return w < 2 ? 2 : w;
 }
 
-static void stroke_path(cairo_t *c, const struct paper_stroke *s, int from)
+/* a stroke's ink from point from on (the source set): the points as stored, the width by
+ * each step's pressure as the compositor's preview draws it (paper_ink_at), else base */
+static void stroke_ink(cairo_t *c, const struct paper_stroke *s, int from, double base)
 {
     if (!s->n) return;
     if (from < 0) from = 0;
-    cairo_move_to(c, s->pt[from].x, s->pt[from].y);
-    if (s->n == 1) cairo_line_to(c, s->pt[0].x + 0.1, s->pt[0].y);   /* a dot */
-    for (int i = from + 1; i < s->n; i++) cairo_line_to(c, s->pt[i].x, s->pt[i].y);
+    if (s->n == 1) {                                                  /* a dot */
+        cairo_move_to(c, s->pt[0].x, s->pt[0].y);
+        cairo_line_to(c, s->pt[0].x + 0.1, s->pt[0].y);
+        cairo_set_line_width(c, paper_ink_at(base, s->pressure ? s->pt[0].p : -1));
+        cairo_stroke(c);
+        return;
+    }
+    if (!s->pressure) {
+        cairo_move_to(c, s->pt[from].x, s->pt[from].y);
+        for (int i = from + 1; i < s->n; i++) cairo_line_to(c, s->pt[i].x, s->pt[i].y);
+        cairo_set_line_width(c, base);
+        cairo_stroke(c);
+        return;
+    }
+    for (int i = from + 1; i < s->n; i++) {
+        cairo_move_to(c, s->pt[i - 1].x, s->pt[i - 1].y);
+        cairo_line_to(c, s->pt[i].x, s->pt[i].y);
+        cairo_set_line_width(c, paper_ink_at(base, (s->pt[i - 1].p + s->pt[i].p) / 2));
+        cairo_stroke(c);
+    }
 }
 
 void paper_draw_all(struct kbd *kb, struct drwsurf *ds)
@@ -1398,14 +1417,18 @@ void paper_draw_all(struct kbd *kb, struct drwsurf *ds)
     cairo_stroke(c);
     cairo_set_dash(c, NULL, 0, 0);
     /* the ink; the ink that was read dims */
-    cairo_set_line_width(c, paper_ink_width(p));
     cairo_set_line_cap(c, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join(c, CAIRO_LINE_JOIN_ROUND);
-    for (int i = 0; i < p->ns; i++) {
-        stroke_path(c, &p->s[i], 0);
-        rgba(c, sc->text, p->pending && i < p->pending_n ? 0.35 : 1);
-        cairo_stroke(c);
+    int dim = p->pending ? (p->pending_n < p->ns ? p->pending_n : p->ns) : 0;
+    rgba(c, sc->text, 1);
+    if (dim) {
+        cairo_push_group(c);            /* the steps overlap at their round ends: dimmed as one */
+        for (int i = 0; i < dim; i++) stroke_ink(c, &p->s[i], 0, paper_ink_width(p));
+        cairo_pop_group_to_source(c);
+        cairo_paint_with_alpha(c, 0.35);
+        rgba(c, sc->text, 1);
     }
+    for (int i = dim; i < p->ns; i++) stroke_ink(c, &p->s[i], 0, paper_ink_width(p));
     cairo_restore(c);
     /* the row and the controls */
     struct paper_item it[PAPER_ITEMS];
@@ -1482,7 +1505,7 @@ void paper_draw_new_ink(struct kbd *kb, struct drwsurf *ds, int *drawn)
     struct paper_stroke *s = &p->s[p->ns - 1];
     int from = *drawn > 0 ? *drawn - 1 : 0;
     if (s->n <= from || (s->n > 1 && s->n - 1 <= from)) return;
-    double lw = paper_ink_width(p), x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    double lw = paper_ink_width(p) * PAPER_INK_MAX, x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
     for (int i = from; i < s->n; i++) {
         x0 = fmin(x0, s->pt[i].x); y0 = fmin(y0, s->pt[i].y);
         x1 = fmax(x1, s->pt[i].x); y1 = fmax(y1, s->pt[i].y);
@@ -1493,12 +1516,10 @@ void paper_draw_new_ink(struct kbd *kb, struct drwsurf *ds, int *drawn)
     drwsurf_damage(ds, bx < 0 ? 0 : bx, by < 0 ? 0 : by, (int)(x1 - x0) + 2 * m + 1, (int)(y1 - y0) + 2 * m + 1);
     cairo_t *c = ds->back_buffer->cairo;
     cairo_save(c);
-    cairo_set_line_width(c, lw);
     cairo_set_line_cap(c, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join(c, CAIRO_LINE_JOIN_ROUND);
-    stroke_path(c, s, from);
     rgba(c, kb->schemes[0].text, 1);
-    cairo_stroke(c);
+    stroke_ink(c, s, from, paper_ink_width(p));
     cairo_restore(c);
     *drawn = s->n;
 }
