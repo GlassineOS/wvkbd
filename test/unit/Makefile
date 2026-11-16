@@ -3,9 +3,9 @@
 TOP = ../..
 B = build
 CFLAGS = -std=gnu99 -Wall -Wextra -Wno-unused-parameter -g -O1 -I$(TOP)
-CORE = $(TOP)/im.c $(TOP)/predict.c $(TOP)/strip.c $(TOP)/osk.c $(TOP)/hw.c $(TOP)/paper.c
+CORE = $(TOP)/im.c $(TOP)/predict.c $(TOP)/strip.c $(TOP)/osk.c $(TOP)/hw.c $(TOP)/paper.c $(TOP)/pen.c
 HDRS = $(wildcard $(TOP)/*.h)
-TESTS = test_core test_predict test_paper
+TESTS = test_core test_predict test_paper test_pen
 
 check: $(addprefix $(B)/, $(TESTS))
 	@mkdir -p $(B)/tmp
@@ -14,7 +14,7 @@ check: $(addprefix $(B)/, $(TESTS))
 
 $(B)/%: %.c $(CORE) $(HDRS) t.h
 	@mkdir -p $(B)
-	$(CC) $(CFLAGS) -o $@ $< $(CORE)
+	$(CC) $(CFLAGS) -o $@ $< $(CORE) -lm
 
 # a hang is found sooner in the test
 $(B)/test_paper: CFLAGS += -DHW_HUNG_MS=1500

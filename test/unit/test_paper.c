@@ -712,7 +712,7 @@ static void test_units(void)
     osk_paper_scale(&o, 9);             /* counts from the next session */
     write_letter(220);
     run(&o, 50);
-    CHECK("scale: a new scale: the session keeps its units", !log_has("device:9.0000"));
+    CHECK("scale: a new scale: the session keeps its units", !log_has("device:9\t") && !log_has("device:9:"));
     osk_finish(&o);
 
     /* a strike on the bare paper in px: still the last word */
