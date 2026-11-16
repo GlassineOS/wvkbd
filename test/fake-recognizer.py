@@ -13,6 +13,11 @@
 # points with the middle one highest a caret (before the character after the strokes left
 # of it). FAKE_TEXTS ("1=apple,2=banana"): the reading for that many strokes instead of
 # w<count>.
+#
+# Units: the shapes are judged in em, so ink in device units (begin with device or
+# device:PER_MM) is scaled by the session's area: its LINE is 5/3 em, as on the keyboard's
+# paper (no area: taken as em). FAKE_AREA_ERROR=bad-area answers every area with that error,
+# as a recognizer older than BASE does.
 import os, sys, time
 mode = os.environ.get("FAKE_MODE", "ok")
 log = os.environ.get("FAKE_LOG")
@@ -21,6 +26,8 @@ idle = float(os.environ.get("FAKE_IDLE", "1"))
 out = sys.stdout
 sessions = {}               # name -> {num: points}
 counter = {}                # name -> next stroke number
+unit = {}                   # name -> client units per em (1 for em)
+devunits = {}               # name -> the session is in device units
 prev_read = None
 texts = dict(kv.split("=", 1) for kv in os.environ.get("FAKE_TEXTS", "").split(",") if "=" in kv)
 
@@ -46,6 +53,8 @@ def gesture(name):
     if not s:
         return None
     n = max(s)
+    u = unit.get(name, 1)
+    s = {k: [(q[0] / u, q[1] / u) + tuple(q[2:]) for q in v] for k, v in s.items()}
     p = s[n]
     x0, y0, x1, y1 = box(p)
     others = {k: v for k, v in s.items() if k != n}
@@ -109,7 +118,19 @@ while True:
         out.write("\x00\x01 nonsense\n"); out.flush(); continue
     if verb == "begin":
         sessions[f[2]] = {}; counter[f[2]] = 0
+        unit[f[2]] = 1; devunits[f[2]] = f[5].startswith("device")
         say("begin", rid, "ok")
+    elif verb == "area":
+        if os.environ.get("FAKE_AREA_ERROR"):
+            say("error", rid, os.environ["FAKE_AREA_ERROR"]); continue
+        v = f[3].split(",")
+        if f[2] not in sessions:
+            say("error", rid, "unknown-session"); continue
+        if len(v) not in (6, 7):
+            say("error", rid, "bad-area"); continue
+        if devunits.get(f[2]) and float(v[4]) > 0:
+            unit[f[2]] = float(v[4]) * 0.6
+        say("area", rid, "ok")
     elif verb == "stroke":
         s = f[2]
         if s not in sessions:
@@ -134,7 +155,8 @@ while True:
             del sessions[s][n]
             k = len(sessions[s]) - len([c for c in cov])
             chars = "@%d" % len(cov) if kind == "caret" else ("0-%d" % (len(cov) - 1) if cov else "-")
-            say("read", rid, "gesture", kind, str(n), "%.2f,%.2f,%.2f,%.2f" % b,
+            u = unit.get(s, 1)
+            say("read", rid, "gesture", kind, str(n), "%.2f,%.2f,%.2f,%.2f" % tuple(v * u for v in b),
                 ",".join(map(str, cov)) or "-", chars)
         elif not sessions[s]:
             say("read", rid, "empty")

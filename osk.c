@@ -763,7 +763,7 @@ static void readings_clear(struct osk *o)
 static bool send_stroke(struct osk *o, struct paper_stroke *st, int64_t now)
 {
     size_t n;
-    char *pts = paper_points_text(&o->pp, st, st->pressure, &n);
+    char *pts = paper_points_text(&o->pp, st, st->pressure, o->session_per_mm, &n);
     if (!pts) return false;
     bool ok = hw_request_raw(&o->hw, now, st->id, "stroke", o->sid, pts, n);
     memset(pts, 0, n);
@@ -781,12 +781,41 @@ static void send_unsent(struct osk *o, int64_t now)
     }
 }
 
+/* the screen's turn as glassine-rotd applied it (0, 90, 180, 270; 0 when not known), as
+ * the samples app reads it */
+static int rotation(void)
+{
+    FILE *f = fopen(OSK_ROTATION_FILE, "re");
+    if (!f) return 0;
+    int r = -1;
+    if (fscanf(f, "%d", &r) != 1) r = -1;
+    fclose(f);
+    return r == 90 || r == 180 || r == 270 ? r : 0;
+}
+
+/* the writing area of the session: the paper, its line and its guide line (BASE), so the
+ * recognizer tells a comma on the line from an apostrophe above it. A recognizer that
+ * doesn't know BASE answers bad-area: ignored, the session goes on without an area. */
+static void send_area(struct osk *o, int64_t now)
+{
+    if (o->pp.w <= 0 || o->pp.h <= 0) return;
+    char a[160];
+    paper_area_text(&o->pp, o->session_per_mm, rotation(), a, sizeof a);
+    hw_request(&o->hw, now, NULL, "area", o->sid, a, (char *)NULL);
+    o->area_w = o->pp.w;
+    o->area_h = o->pp.h;
+}
+
 /* a session on the recognizer's current run (begun again after it went away: the ink is
  * sent again, so a lesson or a reading still has all of it) */
 static bool session(struct osk *o, int64_t now)
 {
     if (!want_recognizer(o)) return false;
-    if (o->session && o->session_gen == o->hw.gen && hw_running(&o->hw)) return true;
+    if (o->session && o->session_gen == o->hw.gen && hw_running(&o->hw)) {
+        /* the paper changed its size (the screen turned): its area again */
+        if (o->pp.w != o->area_w || o->pp.h != o->area_h) send_area(o, now);
+        return true;
+    }
     o->session = false;
     snprintf(o->sid, sizeof o->sid, "s%lu", ++o->nsession % 100000000UL);
     char fld[160];
@@ -798,11 +827,17 @@ static bool session(struct osk *o, int64_t now)
     char before[1028];
     memcpy(before, b + from, len - from);
     before[len - from] = 0;
-    bool ok = hw_request(&o->hw, now, NULL, "begin", o->sid, "-", fld, "em", before, (char *)NULL);
+    /* the units: the surface's px with their size (device:PER_MM), else em */
+    char units[48];
+    if (o->per_mm > 0) snprintf(units, sizeof units, "device:%.4f", o->per_mm);
+    else snprintf(units, sizeof units, "em");
+    bool ok = hw_request(&o->hw, now, NULL, "begin", o->sid, "-", fld, units, before, (char *)NULL);
     memset(before, 0, sizeof before);
     if (!ok) return false;
     o->session = true;
     o->session_gen = o->hw.gen;
+    o->session_per_mm = o->per_mm;
+    send_area(o, now);
     for (int i = 0; i < o->pp.ns; i++) {
         o->pp.s[i].num = -1;
         o->pp.s[i].id[0] = 0;
@@ -1237,7 +1272,12 @@ static void paper_field(struct osk *o, int r, int64_t now)
 
 void osk_paper_size(struct osk *o, int w, int h)
 {
-    paper_size(&o->pp, w, h);
+    paper_size(&o->pp, w, h);           /* a session's area follows at its next request */
+}
+
+void osk_paper_scale(struct osk *o, double per_mm)
+{
+    o->per_mm = per_mm > 0 && per_mm < 1000 ? per_mm : 0;
 }
 
 void osk_pen_down(struct osk *o, double x, double y, double pressure, uint32_t t, int64_t now)

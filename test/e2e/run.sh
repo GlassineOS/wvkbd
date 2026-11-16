@@ -214,6 +214,8 @@ ptr stroke 100,200 150,230 200,210 250,240
 ptr stroke 300,200 350,230 380,215
 check "the strokes reach the recognizer as they are written" "[ \$(grep -c '^stroke' /tmp/hw.log) = 2 ] && grep -q '^read' /tmp/hw.log"
 check "... in em (x,y,t)" "grep -Eq '^stroke.h[0-9]+.s[0-9]+.1\\.0889,1\\.7222,[0-9]+ ' /tmp/hw.log"
+check "... the screen reports no size (headless): no scale, em" "grep -q '^Paper scale 0.0000 px/mm' /tmp/kbd.err && grep -q '^begin.*	em	' /tmp/hw.log"
+check "... the area in em: the paper, its line (half of it), its guide line" "grep -Eq '^area.h[0-9]+.s[0-9]+.0,0,8.88889,3.33333,1.66667,0,2.22222$' /tmp/hw.log"
 expect "before the pause: nothing in the field" "$(last)" "|0"
 sleep 1.2
 expect "after the pause: the reading is pending text" "$(preedit)" "w2"
@@ -308,6 +310,26 @@ expect "email field: no space" "$(last)" "applebanana|11"
 kbd_stop
 unset FAKE_TEXTS
 
+# the screen's scale (GLASSINE_PAPER_PER_MM, as a screen that reports its size gives it):
+# the points in the paper's px with their size, the area with its guide line
+: > /tmp/hw.log
+GLASSINE_PAPER_PER_MM=4.4749 FAKE_LOG=/tmp/hw.log pkbd
+field -c 0,0,2,20
+pen_tap
+ptr stroke 100,200 150,230 200,210 250,240
+sleep 1.2
+check "a scale: the paper's" "grep -q '^Paper scale 4.4749 px/mm' /tmp/kbd.err"
+check "... begun in px with their size (device:PER_MM)" "grep -q '^begin.*	device:4.4749	' /tmp/hw.log"
+check "... the area: the paper, its line, its guide line (BASE)" "grep -Eq '^area.h[0-9]+.s[0-9]+.0,0,800,300,150,0,200$' /tmp/hw.log"
+check "... the points in px" "grep -Eq '^stroke.h[0-9]+.s[0-9]+.98\\.0000,155\\.0000,[0-9]+ ' /tmp/hw.log"
+expect "... read as before" "$(preedit)" "w1"
+ptr stroke 60,200 300,201 560,200   # a strike-through, in px now
+sleep 0.6
+expect "... a strike-through over the pending text: read again without it" "$(preedit)" ""
+ptr tap 763 80                      # put away (a field gone under an open paper crashes the container's sway)
+sleep 0.4
+kbd_stop
+
 # a missing recognizer: the paper takes ink, typing goes on
 HW=/nonexistent/glassine-handwriting pkbd
 field -c 0,0,2,20
@@ -359,6 +381,43 @@ print(len(l), s.get("source"), k.get("rank"), k.get("from"), s.get("text"))' /tm
     check "real recognizer: a picked alternative keeps a sample, its place 2 or more" \
         "lesson | grep -Eq '^2 confirmed [2-9] (beam|ink) '"
     check "real recognizer: still running" "kill -0 $KP"
+    kbd_stop
+
+    # the size (docs/recognizer.md "Size"): the person's letters kept by another app at
+    # another scale (8 units per mm: small letters 3 mm, lone o 3 mm and O 8 mm; and em
+    # samples that must not count), read on the paper at 4.4749 px per mm (1 mm = 4.47 px):
+    # a lone mark and the case by their size in millimetres, a comma from an apostrophe by
+    # the guide line (surface y 200 = screen 245)
+    export XDG_DATA_HOME=/tmp/hwsize
+    check "size: the person's letters kept (another app, 8 units/mm)" \
+        "python3 /t/size-store.py /tmp/b/glassine-handwriting 8 /hw/tests/data/ink.jsonl | grep -q kept"
+    GLASSINE_PAPER_PER_MM=4.4749 HW=/tmp/b/glassine-handwriting pkbd
+    field -c 0,0,2,20
+    pen_tap
+    # a circle: centre x, bottom y (surface px), height (px); as screen points
+    circ() { python3 -c 'import math,sys
+x,b,d=map(float,sys.argv[1:4])
+print(" ".join("%d,%d"%(round(x+2+d/2*math.sin(2*math.pi*i/16)),round(b+45-d/2-d/2*math.cos(2*math.pi*i/16))) for i in range(17)))' "$@"; }
+    reads() {   # name, wanted readings (any of them, |-separated), then the strokes
+        n=$1 w=$2; shift 2
+        for st in "$@"; do ptr stroke $st; done
+        sleep 2.5
+        got=$(preedit)
+        case "|$w|" in
+        *"|$got|"*) [ -n "$got" ] && echo "ok   size: $n reads as $w" || { echo "FAIL size: $n reads as $w"; echo "     got nothing"; fail=1; dump; } ;;
+        *) echo "FAIL size: $n reads as $w"; echo "     got:  $got"; fail=1; dump ;;
+        esac
+        ptr tap 591 80; sleep 0.5          # discard: the paper bare again
+    }
+    reads "a lone dot on the line" "." "$(circ 300 200 4)"
+    reads "a tick down through the line (2.2 mm)" "," "302,243 301,246 300,250 299,253"
+    reads "a tick high above the line" "'|’" "302,205 301,208 301,212 300,215"
+    reads "a short line above the line (5 mm): a hyphen, not a strike" "-" "302,235 309,235 316,236 324,235"
+    reads "a small circle (2.5 mm)" "o" "$(circ 300 200 11)"
+    reads "a large circle (10 mm)" "O|0" "$(circ 300 200 45)"
+    check "size: the person's letters measured" "[ -s /tmp/hwsize/glassine/handwriting/size ]"
+    check "size: still running" "kill -0 $KP"
+    ptr tap 763 80; sleep 0.4
     kbd_stop
 else
     echo "skip the real recognizer (test.sh: HW_SRC=handwriting checkout HW_MODELS=dir with en/recognizer.ghm)"

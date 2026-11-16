@@ -6,6 +6,7 @@
 #include "proto/input-method-unstable-v2-protocol.h"
 #include "proto/glassine-ink-v1-client-protocol.h"
 #include <errno.h>
+#include <math.h>
 #include <linux/input-event-codes.h>
 #include <signal.h>
 #include <spawn.h>
@@ -215,10 +216,97 @@ static const struct wl_seat_listener seat_listener = {
     .name = seat_handle_name,
 };
 
+/* glassine: the outputs' physical size, for the writing paper's scale (px per mm) */
+struct kbd_output {
+    struct wl_output *o;
+    uint32_t name;
+    int32_t mm_w, mm_h;           /* the physical size (0: not known) */
+    int32_t px_w, px_h;           /* the current mode */
+    int32_t scale;
+};
+static struct kbd_output outputs[8];
+static int noutputs;
+static struct wl_output *kbd_on_output;  /* the output the keys or the paper are on */
+
+static struct kbd_output *
+output_of(struct wl_output *o)
+{
+    for (int i = 0; i < noutputs; i++)
+        if (outputs[i].o == o) return &outputs[i];
+    return NULL;
+}
+
+static void
+output_geometry(void *data, struct wl_output *o, int32_t x, int32_t y, int32_t mm_w, int32_t mm_h,
+                int32_t subpixel, const char *make, const char *model, int32_t transform)
+{
+    struct kbd_output *k = output_of(o);
+    if (k) { k->mm_w = mm_w; k->mm_h = mm_h; }
+}
+
+static void
+output_mode(void *data, struct wl_output *o, uint32_t flags, int32_t w, int32_t h, int32_t refresh)
+{
+    struct kbd_output *k = output_of(o);
+    if (k && (flags & WL_OUTPUT_MODE_CURRENT)) { k->px_w = w; k->px_h = h; }
+}
+
+static void paper_scale_update(void);
+
+static void output_done(void *data, struct wl_output *o) { paper_scale_update(); }
+
+static void
+output_scale(void *data, struct wl_output *o, int32_t scale)
+{
+    struct kbd_output *k = output_of(o);
+    if (k) k->scale = scale;
+}
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_geometry,
+    .mode = output_mode,
+    .done = output_done,
+    .scale = output_scale,
+};
+
+/* the writing paper's surface px per mm (0: not known). $GLASSINE_PAPER_PER_MM gives it for
+ * a screen that doesn't report its size (and for tests). Else the output the keys or the
+ * paper are on, or the first that reports its size: its pixels per mm (the same in any
+ * turn: sqrt of the pixels over the area, as the samples app reckons it) over the scale. */
+static double
+paper_per_mm(void)
+{
+    const char *e = getenv("GLASSINE_PAPER_PER_MM");
+    if (e && *e) {
+        double v = strtod(e, NULL);
+        if (v > 0) return v;
+    }
+    struct kbd_output *k = kbd_on_output ? output_of(kbd_on_output) : NULL;
+    if (!k || k->mm_w <= 0 || k->mm_h <= 0 || k->px_w <= 0 || k->px_h <= 0) {
+        k = NULL;
+        for (int i = 0; i < noutputs && !k; i++)
+            if (outputs[i].mm_w > 0 && outputs[i].mm_h > 0 && outputs[i].px_w > 0 && outputs[i].px_h > 0)
+                k = &outputs[i];
+    }
+    if (!k) return 0;
+    double scale = keyboard.preferred_fractional_scale > 0 ? keyboard.preferred_fractional_scale
+                   : k->scale > 0 ? k->scale : 1;
+    return sqrt((double)k->px_w * k->px_h / ((double)k->mm_w * k->mm_h)) / scale;
+}
+
+/* kept current, so a session begins with the scale of the screen it is on */
+static void
+paper_scale_update(void)
+{
+    osk_paper_scale(&osk, paper_per_mm());
+}
+
 void
 wl_surface_enter(void *data, struct wl_surface *wl_surface,
                  struct wl_output *wl_output)
 {
+    kbd_on_output = wl_output;
+    paper_scale_update();
 }
 
 void
@@ -236,6 +324,24 @@ void
 wl_preferred_buffer_transform(void *data, struct wl_surface *wl_surface,
                               uint32_t transform) {
 }
+
+static void
+paper_surface_enter(void *data, struct wl_surface *s, struct wl_output *o)
+{
+    kbd_on_output = o;
+    paper_scale_update();
+}
+
+static void paper_surface_leave(void *data, struct wl_surface *s, struct wl_output *o) {}
+static void paper_surface_scale(void *data, struct wl_surface *s, int scale) {}
+static void paper_surface_transform(void *data, struct wl_surface *s, uint32_t t) {}
+
+static const struct wl_surface_listener paper_surface_listener = {
+    .enter = paper_surface_enter,
+    .leave = paper_surface_leave,
+    .preferred_buffer_scale = paper_surface_scale,
+    .preferred_buffer_transform = paper_surface_transform,
+};
 
 static const struct wl_surface_listener surface_listener = {
     .enter = wl_surface_enter,
@@ -588,6 +694,13 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
             registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
     } else if ((im_auto || im_mode) && strcmp(interface, zwp_input_method_manager_v2_interface.name) == 0) {
         im_mgr = wl_registry_bind(registry, name, &zwp_input_method_manager_v2_interface, 1);
+    } else if (hw_cmd && strcmp(interface, wl_output_interface.name) == 0 &&
+               noutputs < (int)(sizeof outputs / sizeof *outputs) && version >= 2) {
+        struct kbd_output *k = &outputs[noutputs++];
+        memset(k, 0, sizeof *k);
+        k->name = name;
+        k->o = wl_registry_bind(registry, name, &wl_output_interface, version < 3 ? version : 3);
+        wl_output_add_listener(k->o, &output_listener, NULL);
     } else if (hw_cmd && strcmp(interface, glassine_ink_manager_v1_interface.name) == 0) {
         ink_mgr = wl_registry_bind(registry, name, &glassine_ink_manager_v1_interface, version < 2 ? version : 2);
     }
@@ -596,6 +709,14 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
 void
 handle_global_remove(void *data, struct wl_registry *registry, uint32_t name)
 {
+    for (int i = 0; i < noutputs; i++) {
+        if (outputs[i].name != name) continue;
+        if (kbd_on_output == outputs[i].o) kbd_on_output = NULL;
+        if (wl_output_get_version(outputs[i].o) >= 3) wl_output_release(outputs[i].o);
+        else wl_output_destroy(outputs[i].o);
+        outputs[i] = outputs[--noutputs];
+        break;
+    }
 }
 
 static void
@@ -633,6 +754,7 @@ wp_fractional_scale_preferred_scale(
     uint32_t scale)
 {
     keyboard.preferred_fractional_scale = (double)scale / 120;
+    paper_scale_update();
 }
 
 static const struct wp_fractional_scale_v1_listener
@@ -899,6 +1021,7 @@ paper_show(void)
     paper_ds.back_buffer = &paper_buf_a;
     paper_ds.display_buffer = &paper_buf_b;
     paper_ds.surf = paper_surf;
+    wl_surface_add_listener(paper_surf, &paper_surface_listener, NULL);
     osk_paper_size(&osk, (int)w, (int)h);
     if (viewporter) {
         paper_viewport = wp_viewporter_get_viewport(viewporter, paper_surf);
@@ -928,6 +1051,7 @@ paper_show(void)
     drwsurf_attach(&paper_ds);
     paper_writing = paper_ctl = false;
     if (keyboard.debug) fprintf(stderr, "Paper %ux%u\n", w, h);
+    if (keyboard.debug) fprintf(stderr, "Paper scale %.4f px/mm\n", osk.per_mm);
 }
 
 static void
@@ -1785,6 +1909,7 @@ main(int argc, char **argv)
         for (char *t = strtok(hw_cmd, " "); t && n < 15; t = strtok(NULL, " ")) hargv[n++] = t;
         osk_handwriting(&osk, hargv[0] ? hargv : NULL);
     }
+    paper_scale_update();               /* the outputs are known by now */
     if (pen_flag) unlink(pen_flag);     /* a mark from before this run counts nothing */
     if (im_mode) keyboard.osk = &osk;
     if (!im_mode) osk.strip_on = false;

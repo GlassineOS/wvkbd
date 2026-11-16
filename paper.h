@@ -85,10 +85,26 @@ int paper_hit(const struct paper *p, int x, int y, struct paper_item *out);
 /* the display order of the readings in the row: the best in the middle */
 int paper_chip_order(int ncand, int slot);
 
-/* a stroke's points as the contract writes them ("x,y,t[,p] ..."), in em: the writing
- * line's height (paper_em) is 1. Returns a malloc'd string, its length in *len. */
+/* The units the recognizer gets (docs/recognizer.md of GlassineOS/handwriting). With the
+ * screen's scale known (px per mm > 0): the surface's px, sent as device:PER_MM, so the size
+ * of the ink is compared in millimetres with the person's letters from any app. Without it:
+ * em (paper_em px is 1), as the keyboard always sent. paper_unit: px per unit. */
 double paper_em(const struct paper *p);
-char *paper_points_text(const struct paper *p, const struct paper_stroke *s, bool pressure, size_t *len);
+double paper_unit(const struct paper *p, double per_mm);
+/* the area's line for the recognizer: the paper is one line, its guide line (paper_guide_y)
+ * the line letters sit on (BASE). LINE is half the paper's height: the lines before and
+ * after the guide line fall outside the writing area (in the top row, below the edge), so
+ * a mark is placed by the guide line unless it is written more than half a line away;
+ * and without the person's letters the recognizer takes small letters as 0.2 lines, which
+ * at half the paper keeps a small lone letter from counting as a dot (the whole paper
+ * would not). At the keyboard's 300 px the samples app's line too (150 px). */
+double paper_line(const struct paper *p);
+/* the area request's value: "X0,Y0,X1,Y1,LINE,ROT,BASE" in the units of paper_unit */
+void paper_area_text(const struct paper *p, double per_mm, int rot, char *out, size_t n);
+/* a stroke's points as the contract writes them ("x,y,t[,p] ..."), in the units of
+ * paper_unit. Returns a malloc'd string, its length in *len. */
+char *paper_points_text(const struct paper *p, const struct paper_stroke *s, bool pressure, double per_mm,
+                        size_t *len);
 
 #define PAPER_NOTE_LEARNED "Noted. This paper learns your handwriting, on this device only."
 
