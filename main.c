@@ -5,6 +5,7 @@
 #include "proto/viewporter-client-protocol.h"
 #include "proto/input-method-unstable-v2-protocol.h"
 #include "proto/glassine-ink-v1-client-protocol.h"
+#include "proto/tablet-unstable-v2-client-protocol.h"
 #include <errno.h>
 #include <math.h>
 #include <linux/input-event-codes.h>
@@ -28,6 +29,7 @@
 #include "keyboard.h"
 #include "config.h"
 #include "paperdraw.h"
+#include "pen.h"
 
 /* lazy die macro */
 #define die(...)                                                               \
@@ -81,7 +83,26 @@ static struct wp_viewport *paper_viewport;
 static struct drwbuf paper_buf_a, paper_buf_b;
 static struct drwsurf paper_ds;
 static int paper_drawn;                 /* points of the stroke being written drawn */
-static bool paper_writing, paper_ctl;   /* the pointer's press writes / hit a control */
+static struct pen ptr_pen;              /* the pen as the emulated pointer on the paper (pen.c) */
+static struct zwp_tablet_manager_v2 *tablet_mgr;
+static struct zwp_tablet_seat_v2 *tablet_seat;
+/* a tablet tool (the pen's tip, its eraser end): the surface it is over, its paper state */
+struct kbd_tool {
+    struct zwp_tablet_tool_v2 *t;
+    struct wl_surface *surf, *entering;
+    bool leaving;
+    bool on_keys;                       /* it is the pointer on the keys (or the strip) */
+    struct pen pen;
+};
+#define MAX_TOOLS 4
+static struct kbd_tool tools[MAX_TOOLS];
+
+static void
+paper_pens_reset(void)
+{
+    pen_reset(&ptr_pen);
+    for (int i = 0; i < MAX_TOOLS; i++) pen_reset(&tools[i].pen);
+}
 static struct wl_surface *ptr_surface;  /* the surface the pointer is on */
 static uint32_t paper_touches;          /* touch ids (< 32) that began on the paper */
 static void paper_show(void);
@@ -502,6 +523,8 @@ wl_pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
     cur_x = wl_fixed_to_int(surface_x);
     cur_y = wl_fixed_to_int(surface_y);
     ptr_surface = surface;
+    if (paper_surf && surface == paper_surf)            /* where a press starts (hover: not ink) */
+        pen_ptr_motion(&ptr_pen, wl_fixed_to_double(surface_x), wl_fixed_to_double(surface_y), 0);
     osk_pen_on_keys(&osk, surface && (surface == draw_surf.surf || surface == popup_draw_surf.surf));
     if (keyboard.debug && surface == paper_surf) fprintf(stderr, "Paper: pointer in %d,%d\n", cur_x, cur_y);
 }
@@ -511,10 +534,8 @@ wl_pointer_leave(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                  struct wl_surface *surface)
 {
     cur_x = cur_y = -1;
-    if (ptr_surface && ptr_surface == paper_surf && paper_writing) {     /* the pen left the paper */
-        paper_writing = false;
-        osk_pen_up(&osk, monotime());
-    }
+    if (ptr_surface && ptr_surface == paper_surf)       /* the pen left the paper */
+        pen_ptr_leave(&ptr_pen, monotime());
     if (ptr_surface && ptr_surface == paper_surf) osk_paper_release(&osk);
     if (keyboard.debug && ptr_surface && ptr_surface == paper_surf) fprintf(stderr, "Paper: pointer out\n");
     ptr_surface = NULL;
@@ -530,10 +551,9 @@ wl_pointer_motion(void *data, struct wl_pointer *wl_pointer, uint32_t time,
     if (paper_surf && ptr_surface == paper_surf) {
         cur_x = wl_fixed_to_int(surface_x);
         cur_y = wl_fixed_to_int(surface_y);
-        if (paper_writing) {
-            osk_pen_motion(&osk, wl_fixed_to_double(surface_x), wl_fixed_to_double(surface_y), -1, time);
+        /* the hover isn't kept; while writing, a motion is held back one event (pen.c) */
+        if (pen_ptr_motion(&ptr_pen, wl_fixed_to_double(surface_x), wl_fixed_to_double(surface_y), time) & PEN_INK)
             paper_draw_new_ink(&keyboard, &paper_ds, &paper_drawn);
-        }
         return;
     }
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
@@ -556,25 +576,13 @@ wl_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
 {
     if (paper_surf && ptr_surface == paper_surf) {     /* glassine: the paper */
         bool down = state == WL_POINTER_BUTTON_STATE_PRESSED;
-        if (down && !paper_writing && !paper_ctl) {
-            if (osk_paper_tap(&osk, cur_x, cur_y, monotime())) {
-                paper_ctl = true;
-            } else {
-                if (keyboard.debug) fprintf(stderr, "Paper: pen down %d,%d\n", cur_x, cur_y);
-                paper_writing = true;
-                paper_drawn = 0;
-                osk_pen_down(&osk, cur_x, cur_y, -1, time, monotime());
-                paper_draw_new_ink(&keyboard, &paper_ds, &paper_drawn);
-            }
-        } else if (!down) {
-            if (paper_writing) {
-                paper_writing = false;
-                osk_pen_up(&osk, monotime());
-                if (keyboard.debug) fprintf(stderr, "Paper: pen up (%d strokes)\n", osk.pp.ns);
-            }
-            if (paper_ctl) osk_paper_release(&osk);
-            paper_ctl = false;
+        int r = pen_ptr_button(&ptr_pen, down, time, monotime());
+        if (r & PEN_DOWN) {
+            if (keyboard.debug) fprintf(stderr, "Paper: pen down %.2f,%.2f\n", ptr_pen.px, ptr_pen.py);
+            paper_drawn = 0;
         }
+        if (r & PEN_INK) paper_draw_new_ink(&keyboard, &paper_ds, &paper_drawn);
+        if ((r & PEN_UP) && keyboard.debug) fprintf(stderr, "Paper: pen up (%d strokes)\n", osk.pp.ns);
         return;
     }
     if(!layer_surface_configured || !popup_xdg_surface_configured) {
@@ -619,6 +627,156 @@ wl_pointer_axis(void *data, struct wl_pointer *wl_pointer, uint32_t time,
 
     kbd_next_layer(&keyboard, NULL, (value >= 0));
 }
+
+/* glassine: the pen as a tablet tool (tablet-unstable-v2, bound with --handwriting). The
+ * compositor then sends the pen to all of this client's surfaces as a tool, not as the
+ * pointer: on the paper it writes through pen.c (the down frame's own position, pressure
+ * and tilt; the lift-off not kept); on the keys and the strip it is the pointer, as
+ * before (the same handlers, the frame's position). */
+static void
+tool_paper_result(struct kbd_tool *k, int r)
+{
+    if (r & PEN_DOWN) {
+        paper_drawn = 0;
+        if (keyboard.debug) fprintf(stderr, "Paper: pen down %.2f,%.2f (tablet)\n", k->pen.x, k->pen.y);
+    }
+    if (r & PEN_INK) paper_draw_new_ink(&keyboard, &paper_ds, &paper_drawn);
+    if ((r & PEN_UP) && keyboard.debug) fprintf(stderr, "Paper: pen up (%d strokes)\n", osk.pp.ns);
+}
+
+static void tool_type(void *d, struct zwp_tablet_tool_v2 *t, uint32_t type)
+{
+    struct kbd_tool *k = d;
+    k->pen.eraser = type == ZWP_TABLET_TOOL_V2_TYPE_ERASER;
+}
+static void tool_serial(void *d, struct zwp_tablet_tool_v2 *t, uint32_t hi, uint32_t lo) {}
+static void tool_hwid(void *d, struct zwp_tablet_tool_v2 *t, uint32_t hi, uint32_t lo) {}
+static void tool_capability(void *d, struct zwp_tablet_tool_v2 *t, uint32_t cap)
+{
+    struct kbd_tool *k = d;
+    if (cap == ZWP_TABLET_TOOL_V2_CAPABILITY_PRESSURE) k->pen.has_pressure = true;
+    if (cap == ZWP_TABLET_TOOL_V2_CAPABILITY_TILT) k->pen.has_tilt = true;
+}
+static void tool_done(void *d, struct zwp_tablet_tool_v2 *t) {}
+static void tool_removed(void *d, struct zwp_tablet_tool_v2 *t)
+{
+    struct kbd_tool *k = d;
+    if (k->surf && k->surf == paper_surf) tool_paper_result(k, pen_tool_leave(&k->pen, monotime()));
+    if (k->on_keys) wl_pointer_leave(NULL, NULL, 0, k->surf);
+    zwp_tablet_tool_v2_destroy(t);
+    memset(k, 0, sizeof *k);
+}
+static void tool_proximity_in(void *d, struct zwp_tablet_tool_v2 *t, uint32_t serial,
+                              struct zwp_tablet_v2 *tablet, struct wl_surface *surface)
+{
+    struct kbd_tool *k = d;
+    k->entering = surface;
+    k->leaving = false;
+}
+static void tool_proximity_out(void *d, struct zwp_tablet_tool_v2 *t)
+{
+    struct kbd_tool *k = d;
+    k->leaving = true;
+}
+static void tool_down(void *d, struct zwp_tablet_tool_v2 *t, uint32_t serial)
+{
+    pen_tool_down(&((struct kbd_tool *)d)->pen);
+}
+static void tool_up(void *d, struct zwp_tablet_tool_v2 *t)
+{
+    pen_tool_up(&((struct kbd_tool *)d)->pen);
+}
+static void tool_motion(void *d, struct zwp_tablet_tool_v2 *t, wl_fixed_t x, wl_fixed_t y)
+{
+    pen_tool_motion(&((struct kbd_tool *)d)->pen, wl_fixed_to_double(x), wl_fixed_to_double(y));
+}
+static void tool_pressure(void *d, struct zwp_tablet_tool_v2 *t, uint32_t p)
+{
+    pen_tool_pressure(&((struct kbd_tool *)d)->pen, p / 65535.0);
+}
+static void tool_distance(void *d, struct zwp_tablet_tool_v2 *t, uint32_t v) {}
+static void tool_tilt(void *d, struct zwp_tablet_tool_v2 *t, wl_fixed_t tx, wl_fixed_t ty)
+{
+    pen_tool_tilt(&((struct kbd_tool *)d)->pen, wl_fixed_to_double(tx), wl_fixed_to_double(ty));
+}
+static void tool_rotation(void *d, struct zwp_tablet_tool_v2 *t, wl_fixed_t v) {}
+static void tool_slider(void *d, struct zwp_tablet_tool_v2 *t, int32_t v) {}
+static void tool_wheel(void *d, struct zwp_tablet_tool_v2 *t, wl_fixed_t v, int32_t c) {}
+static void tool_button(void *d, struct zwp_tablet_tool_v2 *t, uint32_t serial, uint32_t button, uint32_t state) {}
+
+static void tool_frame(void *d, struct zwp_tablet_tool_v2 *t, uint32_t time)
+{
+    struct kbd_tool *k = d;
+    struct pen *pn = &k->pen;
+    int64_t now = monotime();
+    if (k->entering) {
+        k->surf = k->entering;
+        k->entering = NULL;
+        if (paper_surf && k->surf == paper_surf) {
+            pen_tool_enter(pn);          /* the pointer doesn't also write (pen.c) */
+            osk_pen_on_keys(&osk, false);
+            if (keyboard.debug) fprintf(stderr, "Paper: tool in %.2f,%.2f\n", pn->x, pn->y);
+        } else {
+            k->on_keys = true;
+            wl_pointer_enter(NULL, NULL, 0, k->surf, wl_fixed_from_double(pn->x), wl_fixed_from_double(pn->y));
+        }
+    }
+    if (paper_surf && k->surf == paper_surf) {
+        tool_paper_result(k, pen_tool_frame(pn, time, now));
+        cur_x = (int)pn->x;
+        cur_y = (int)pn->y;
+    } else if (k->on_keys) {
+        /* the keys: the pointer's handlers, the frame's position */
+        bool down = pn->f_down, up = pn->f_up, moved = pn->f_motion;
+        pen_tool_drop(pn);
+        if (moved) wl_pointer_motion(NULL, NULL, time, wl_fixed_from_double(pn->x), wl_fixed_from_double(pn->y));
+        if (down) wl_pointer_button(NULL, NULL, 0, time, BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
+        if (up) wl_pointer_button(NULL, NULL, 0, time, BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+    } else {
+        pen_tool_drop(pn);
+    }
+    if (k->leaving) {
+        k->leaving = false;
+        if (paper_surf && k->surf == paper_surf) {
+            tool_paper_result(k, pen_tool_leave(pn, now));
+            osk_paper_release(&osk);
+            if (keyboard.debug) fprintf(stderr, "Paper: tool out\n");
+        } else if (k->on_keys) {
+            wl_pointer_leave(NULL, NULL, 0, k->surf);
+        }
+        k->surf = NULL;
+        k->on_keys = false;
+    }
+}
+
+static const struct zwp_tablet_tool_v2_listener tool_listener = {
+    .type = tool_type, .hardware_serial = tool_serial, .hardware_id_wacom = tool_hwid,
+    .capability = tool_capability, .done = tool_done, .removed = tool_removed,
+    .proximity_in = tool_proximity_in, .proximity_out = tool_proximity_out,
+    .down = tool_down, .up = tool_up, .motion = tool_motion, .pressure = tool_pressure,
+    .distance = tool_distance, .tilt = tool_tilt, .rotation = tool_rotation,
+    .slider = tool_slider, .wheel = tool_wheel, .button = tool_button, .frame = tool_frame,
+};
+
+/* the tablets and pads themselves aren't needed (no listener: their events are dropped) */
+static void tseat_tablet(void *d, struct zwp_tablet_seat_v2 *s, struct zwp_tablet_v2 *tablet) {}
+static void tseat_pad(void *d, struct zwp_tablet_seat_v2 *s, struct zwp_tablet_pad_v2 *pad) {}
+static void tseat_tool(void *d, struct zwp_tablet_seat_v2 *s, struct zwp_tablet_tool_v2 *t)
+{
+    for (int i = 0; i < MAX_TOOLS; i++) {
+        if (tools[i].t) continue;
+        memset(&tools[i], 0, sizeof tools[i]);
+        tools[i].t = t;
+        pen_init(&tools[i].pen, &osk);
+        zwp_tablet_tool_v2_add_listener(t, &tool_listener, &tools[i]);
+        return;
+    }
+    zwp_tablet_tool_v2_destroy(t);      /* more tools than kept: not ours to use */
+}
+
+static const struct zwp_tablet_seat_v2_listener tablet_seat_listener = {
+    .tablet_added = tseat_tablet, .tool_added = tseat_tool, .pad_added = tseat_pad,
+};
 
 void
 seat_handle_capabilities(void *data, struct wl_seat *wl_seat,
@@ -701,6 +859,8 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
         k->name = name;
         k->o = wl_registry_bind(registry, name, &wl_output_interface, version < 3 ? version : 3);
         wl_output_add_listener(k->o, &output_listener, NULL);
+    } else if (hw_cmd && strcmp(interface, zwp_tablet_manager_v2_interface.name) == 0) {
+        tablet_mgr = wl_registry_bind(registry, name, &zwp_tablet_manager_v2_interface, 1);
     } else if (hw_cmd && strcmp(interface, glassine_ink_manager_v1_interface.name) == 0) {
         ink_mgr = wl_registry_bind(registry, name, &glassine_ink_manager_v1_interface, version < 2 ? version : 2);
     }
@@ -1042,14 +1202,14 @@ paper_show(void)
         if (glassine_ink_surface_v1_get_version(paper_ink) >= 2) {
             double iw = paper_ink_width(&osk.pp);
             glassine_ink_surface_v1_set_brush(paper_ink, GLASSINE_INK_SURFACE_V1_TOOL_TIP, GLASSINE_INK_SURFACE_V1_KIND_PEN,
-                                              wl_fixed_from_double(iw), wl_fixed_from_double(iw * 1.4), wl_fixed_from_double(1));
+                                              wl_fixed_from_double(iw), wl_fixed_from_double(iw * PAPER_INK_MAX), wl_fixed_from_double(1));
             glassine_ink_surface_v1_set_brush(paper_ink, GLASSINE_INK_SURFACE_V1_TOOL_ERASER, GLASSINE_INK_SURFACE_V1_KIND_NONE,
                                               wl_fixed_from_double(1), wl_fixed_from_double(1), wl_fixed_from_double(1));
         }
     }
     paper_draw_all(&keyboard, &paper_ds);
     drwsurf_attach(&paper_ds);
-    paper_writing = paper_ctl = false;
+    paper_pens_reset();
     if (keyboard.debug) fprintf(stderr, "Paper %ux%u\n", w, h);
     if (keyboard.debug) fprintf(stderr, "Paper scale %.4f px/mm\n", osk.per_mm);
 }
@@ -1068,12 +1228,17 @@ paper_hide(void)
     paper_viewport = NULL;
     zwp_input_popup_surface_v2_destroy(paper_popup);
     paper_popup = NULL;
+    for (int i = 0; i < MAX_TOOLS; i++)
+        if (tools[i].t && tools[i].surf == paper_surf) {
+            pen_tool_leave(&tools[i].pen, monotime());
+            tools[i].surf = NULL;
+        }
     wl_surface_destroy(paper_surf);
     if (ptr_surface == paper_surf) ptr_surface = NULL;
     paper_surf = NULL;
     paper_ds.surf = NULL;
     paper_ds.attached = false;
-    paper_writing = paper_ctl = false;
+    paper_pens_reset();
     paper_touches = 0;
     if (keyboard.debug) fprintf(stderr, "Paper hidden\n");
 }
@@ -1874,6 +2039,13 @@ main(int argc, char **argv)
     }
     if (vkbd_mgr == NULL) {
         die("virtual_keyboard_manager not available\n");
+    }
+
+    /* glassine: the pen as a tablet tool on the paper (else it comes as the pointer) */
+    pen_init(&ptr_pen, &osk);
+    if (tablet_mgr && seat) {
+        tablet_seat = zwp_tablet_manager_v2_get_tablet_seat(tablet_mgr, seat);
+        zwp_tablet_seat_v2_add_listener(tablet_seat, &tablet_seat_listener, NULL);
     }
 
     // A second round-trip to receive wl_outputs events
