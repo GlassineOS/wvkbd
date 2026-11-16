@@ -42,7 +42,13 @@ wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus these changes:
     the ink. Writing on commits it; a picked alternative or a correction
     commits it as a lesson. A strike-through deletes the struck characters
     (on bare paper: the last word), a scratch-out discards the pending text,
-    a caret inserts a space. The pen draws (pointer events: a tablet pen as
+    a caret inserts a space. The ink's size counts (a lone dot, comma or
+    apostrophe, o or O): the strokes go in the paper's px with the screen's
+    size (device:PER_MM, px per mm from the output's physical size over its
+    scale; GLASSINE_PAPER_PER_MM=N for a screen that reports none), else in
+    em, and in both the paper is the session's writing area: one line half
+    the paper high, the guide line as the line letters sit on (BASE). The
+    pen draws (pointer events: a tablet pen as
     the compositor hands it to a client without tablet support); a finger
     only taps the controls. Private fields: no paper, nothing sent.
     The paper's corner has Backspace (the pending reading's last character
