@@ -48,9 +48,17 @@ wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus these changes:
     scale; GLASSINE_PAPER_PER_MM=N for a screen that reports none), else in
     em, and in both the paper is the session's writing area: one line half
     the paper high, the guide line as the line letters sit on (BASE). The
-    pen draws (pointer events: a tablet pen as
-    the compositor hands it to a client without tablet support); a finger
-    only taps the controls. Private fields: no paper, nothing sent.
+    pen draws as a tablet tool (tablet-unstable-v2, where the compositor has
+    it): a stroke from the down event's own position to the last report with
+    the tip down (the lift-off report is not kept), with its pressure and
+    tilt, the units with the pen's report rate (device:PER_MM:RATE), as a
+    toolkit with tablet support hands the pen to the handwriting samples
+    app; the paper draws each step as wide as the compositor's live preview
+    (its brush by pressure). Without tablet support the pen comes as the
+    pointer: the stroke from the press's position (fractional, no hover),
+    the motion with the release's time (the lift-off) dropped, no pressure;
+    while a tool is over the paper the pointer writes nothing. A finger only
+    taps the controls. Private fields: no paper, nothing sent.
     The paper's corner has Backspace (the pending reading's last character
     first, else the character before the cursor; it repeats while held) next
     to the keys and put-away controls; with a reading, a discard control
@@ -67,8 +75,8 @@ wvkbd 0.21 (https://github.com/jjsullivan5196/wvkbd) plus these changes:
       --paper-height PX  the paper's height (default: the keys')
     Files: im.c (the field), predict.c (the predictor client), strip.c (the
     strip), hw.c (the recognizer client), paper.c (the paper's model and
-    layout; drawn in keyboard.c), osk.c (all of them together; no Wayland,
-    host-tested), textrules.h.
+    layout; drawn in keyboard.c), pen.c (the pen's events to strokes), osk.c
+    (all of them together; no Wayland, host-tested), textrules.h.
 
 Without the new options, and on upstream's layers, the keyboard behaves as
 upstream's.

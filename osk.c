@@ -1,4 +1,5 @@
 /* glassine: the keyboard as the input method (see osk.h) */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -827,10 +828,9 @@ static bool session(struct osk *o, int64_t now)
     char before[1028];
     memcpy(before, b + from, len - from);
     before[len - from] = 0;
-    /* the units: the surface's px with their size (device:PER_MM), else em */
-    char units[48];
-    if (o->per_mm > 0) snprintf(units, sizeof units, "device:%.4f", o->per_mm);
-    else snprintf(units, sizeof units, "em");
+    /* the units: the surface's px with their size and the pen's rate, else em */
+    char units[64];
+    osk_units_text(o->per_mm, o->rate, units, sizeof units);
     bool ok = hw_request(&o->hw, now, NULL, "begin", o->sid, "-", fld, units, before, (char *)NULL);
     memset(before, 0, sizeof before);
     if (!ok) return false;
@@ -1275,12 +1275,34 @@ void osk_paper_size(struct osk *o, int w, int h)
     paper_size(&o->pp, w, h);           /* a session's area follows at its next request */
 }
 
+int osk_paper_strokes(const struct osk *o)
+{
+    return o->pp.ns;
+}
+
+void osk_units_text(double per_mm, int rate, char *out, size_t n)
+{
+    if (per_mm <= 0) {
+        snprintf(out, n, "em");
+        return;
+    }
+    /* PER_MM to 4 places in its shortest form (as the samples app writes it), RATE when known */
+    char v[32];
+    snprintf(v, sizeof v, "%.4f", per_mm);
+    char *e = v + strlen(v);
+    while (e > v && e[-1] == '0') *--e = 0;
+    if (e > v && e[-1] == '.') *--e = 0;
+    if (rate > 0) snprintf(out, n, "device:%s:%d", v, rate);
+    else snprintf(out, n, "device:%s", v);
+}
+
 void osk_paper_scale(struct osk *o, double per_mm)
 {
     o->per_mm = per_mm > 0 && per_mm < 1000 ? per_mm : 0;
 }
 
-void osk_pen_down(struct osk *o, double x, double y, double pressure, uint32_t t, int64_t now)
+void osk_pen_down_tilt(struct osk *o, double x, double y, double pressure, double tx, double ty, uint32_t t,
+                       int64_t now)
 {
     if (!o->paper_up || fixing(o) || o->pp.drawing) return;
     o->pause_at = 0;
@@ -1288,21 +1310,37 @@ void osk_pen_down(struct osk *o, double x, double y, double pressure, uint32_t t
     if (!st) return;
     if (o->pp.ns == 1) o->t0 = t;
     st->pressure = pressure >= 0;
-    paper_point(st, (float)x, (float)y, (float)(pressure < 0 ? 0 : pressure), (int32_t)(t - (uint32_t)o->t0));
+    st->tilt = st->pressure && !isnan(tx) && !isnan(ty);
+    paper_point_tilt(st, (float)x, (float)y, (float)(pressure < 0 ? 0 : pressure), st->tilt ? (float)tx : 0,
+                     st->tilt ? (float)ty : 0, (int32_t)(t - (uint32_t)o->t0));
     o->pp.drawing = true;
+}
+
+void osk_pen_motion_tilt(struct osk *o, double x, double y, double pressure, double tx, double ty, uint32_t t)
+{
+    if (!o->paper_up || !o->pp.drawing || !o->pp.ns) return;
+    struct paper_stroke *st = &o->pp.s[o->pp.ns - 1];
+    bool tilt = st->tilt && !isnan(tx) && !isnan(ty);
+    paper_point_tilt(st, (float)x, (float)y, (float)(pressure < 0 ? 0 : pressure), tilt ? (float)tx : 0,
+                     tilt ? (float)ty : 0, (int32_t)(t - (uint32_t)o->t0));
+}
+
+void osk_pen_down(struct osk *o, double x, double y, double pressure, uint32_t t, int64_t now)
+{
+    osk_pen_down_tilt(o, x, y, pressure, NAN, NAN, t, now);
 }
 
 void osk_pen_motion(struct osk *o, double x, double y, double pressure, uint32_t t)
 {
-    if (!o->paper_up || !o->pp.drawing || !o->pp.ns) return;
-    struct paper_stroke *st = &o->pp.s[o->pp.ns - 1];
-    paper_point(st, (float)x, (float)y, (float)(pressure < 0 ? 0 : pressure), (int32_t)(t - (uint32_t)o->t0));
+    osk_pen_motion_tilt(o, x, y, pressure, NAN, NAN, t);
 }
 
 void osk_pen_up(struct osk *o, int64_t now)
 {
     if (!o->paper_up || !o->pp.drawing) return;
     o->pp.drawing = false;
+    int rate = paper_rate(&o->pp);      /* the pen's rate, for the next session's units */
+    if (rate > 0) o->rate = rate;
     if (session(o, now)) send_unsent(o, now);
     ask_read(o, now);
     o->pause_at = now + o->pause_ms;

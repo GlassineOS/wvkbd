@@ -1,4 +1,5 @@
 /* glassine: the writing paper's model and geometry (see paper.h) */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,11 @@ struct paper_stroke *paper_stroke_new(struct paper *p)
 
 bool paper_point(struct paper_stroke *s, float x, float y, float pressure, int32_t t)
 {
+    return paper_point_tilt(s, x, y, pressure, 0, 0, t);
+}
+
+bool paper_point_tilt(struct paper_stroke *s, float x, float y, float pressure, float tx, float ty, int32_t t)
+{
     if (s->n >= PAPER_POINTS_MAX) return false;
     if (s->n && s->pt[s->n - 1].x == x && s->pt[s->n - 1].y == y) return true;  /* no move */
     if (s->n && t < s->pt[s->n - 1].t) t = s->pt[s->n - 1].t;                   /* increasing */
@@ -65,7 +71,7 @@ bool paper_point(struct paper_stroke *s, float x, float y, float pressure, int32
         s->pt = q;
         s->cap = cap;
     }
-    s->pt[s->n++] = (struct paper_pt){ x, y, pressure < 0 ? 0 : pressure > 1 ? 1 : pressure, t };
+    s->pt[s->n++] = (struct paper_pt){ x, y, pressure < 0 ? 0 : pressure > 1 ? 1 : pressure, tx, ty, t };
     return true;
 }
 
@@ -174,17 +180,53 @@ char *paper_points_text(const struct paper *p, const struct paper_stroke *s, boo
                         size_t *len)
 {
     double em = paper_unit(p, per_mm);
-    size_t cap = (size_t)s->n * 40 + 16, k = 0;
+    bool tilt = pressure && s->tilt;
+    size_t cap = (size_t)s->n * 72 + 16, k = 0;
     char *b = malloc(cap);
     if (!b) return NULL;
     for (int i = 0; i < s->n; i++) {
         const struct paper_pt *q = &s->pt[i];
-        int w = pressure ? snprintf(b + k, cap - k, "%s%.4f,%.4f,%d,%.3f", i ? " " : "", q->x / em, q->y / em, q->t, q->p)
-                         : snprintf(b + k, cap - k, "%s%.4f,%.4f,%d", i ? " " : "", q->x / em, q->y / em, q->t);
+        int w = tilt ? snprintf(b + k, cap - k, "%s%.4f,%.4f,%d,%.6g,%.6g,%.6g", i ? " " : "", q->x / em, q->y / em,
+                                q->t, q->p, q->tx, q->ty)
+                : pressure ? snprintf(b + k, cap - k, "%s%.4f,%.4f,%d,%.6g", i ? " " : "", q->x / em, q->y / em, q->t, q->p)
+                           : snprintf(b + k, cap - k, "%s%.4f,%.4f,%d", i ? " " : "", q->x / em, q->y / em, q->t);
         if (w < 0 || (size_t)w >= cap - k) { free(b); return NULL; }
         k += (size_t)w;
     }
     b[k] = 0;
     *len = k;
     return b;
+}
+
+double paper_ink_at(double base, double pressure)
+{
+    if (pressure < 0) return base;
+    if (pressure > 1) pressure = 1;
+    return base * (1 + (PAPER_INK_MAX - 1) * pressure);
+}
+
+static int cmp_int(const void *a, const void *b)
+{
+    int x = *(const int *)a, y = *(const int *)b;
+    return x < y ? -1 : x > y;
+}
+
+int paper_rate(const struct paper *p)
+{
+    int n = 0;
+    for (int i = 0; i < p->ns; i++) n += p->s[i].n;
+    if (n < 9) return 0;
+    int *d = malloc((size_t)n * sizeof *d), k = 0;
+    if (!d) return 0;
+    for (int i = 0; i < p->ns; i++)
+        for (int j = 1; j < p->s[i].n; j++)
+            if (p->s[i].pt[j].t > p->s[i].pt[j - 1].t) d[k++] = p->s[i].pt[j].t - p->s[i].pt[j - 1].t;
+    int r = 0;
+    if (k >= 8) {
+        qsort(d, (size_t)k, sizeof *d, cmp_int);
+        double med = k % 2 ? d[k / 2] : (d[k / 2 - 1] + d[k / 2]) / 2.0;
+        r = (int)lround(1000 / med);
+    }
+    free(d);
+    return r;
 }
