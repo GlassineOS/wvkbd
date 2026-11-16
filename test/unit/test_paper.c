@@ -234,9 +234,22 @@ static void test_geometry(void)
     paper_point(s, 90, 180, 0, 4);      /* no move: not kept */
     paper_point(s, 180, 90, 0.5, 8);
     size_t len;
-    char *t = paper_points_text(&p, s, false, &len);
-    CHECK_STR("geometry: points in em (the writing line is 1)", t, "1.0000,2.0000,0 2.0000,1.0000,8");
+    char *t = paper_points_text(&p, s, false, 0, &len);
+    CHECK_STR("geometry: no scale: points in em (the writing line is 1)", t, "1.0000,2.0000,0 2.0000,1.0000,8");
     free(t);
+    t = paper_points_text(&p, s, false, 4.4749, &len);
+    CHECK_STR("geometry: with a scale: points in the surface's px", t, "90.0000,180.0000,0 180.0000,90.0000,8");
+    free(t);
+    char a[160];
+    paper_area_text(&p, 4.4749, 90, a, sizeof a);
+    CHECK_STR("geometry: the area in px: the paper, its line, the turn, the guide line", a, "0,0,800,300,150,90,200");
+    paper_area_text(&p, 0, 0, a, sizeof a);
+    CHECK_STR("geometry: the area in em", a, "0,0,8.88889,3.33333,1.66667,0,2.22222");
+    /* one line: the lines before and after the guide line lie outside the writing area
+     * (the top row's ctl + ctl / 2 and the paper's edge) */
+    double line = paper_line(&p), top = p.ctl + p.ctl / 2.0;
+    CHECK("geometry: the paper's only line in the writing area is the guide line",
+          paper_guide_y(&p) - line < top && paper_guide_y(&p) + line > p.h);
     paper_free(&p);
 }
 
@@ -673,6 +686,84 @@ static void test_gestures(void)
     osk_finish(&o);
 }
 
+/* the units and the writing area (the size of the ink, docs/recognizer.md "Size") */
+static void test_units(void)
+{
+    int strike[] = { 60, 160, 300, 161, 560, 160 };
+
+    /* the screen's scale known: px with their size, the area with the guide line */
+    fresh("ok", fake);
+    osk_paper_scale(&o, 4.4749);
+    focus(IM_P_NORMAL, 0, "", true);
+    osk_paper_open(&o, now_ms());
+    run(&o, 1);
+    CHECK("scale: begun in px with their size (device:PER_MM)", log_has("\t-\tnormal\tdevice:4.4749\t"));
+    CHECK("scale: the area after the begin: the paper, its line, its guide line (BASE)",
+          log_has("\t0,0,800,300,150,0,200\n") && log_count("area") == 1);
+    write_letter(100);
+    run(&o, PAUSE + 100);
+    CHECK("scale: the points in the surface's px", log_has("\t100.0000,140.0000,"));
+    CHECK_STR("scale: read as before", pre, "w1");
+    osk_paper_size(&o, 600, 240);       /* the screen turned */
+    write_letter(160);
+    run(&o, PAUSE + 100);
+    CHECK("scale: a new size: the area again, before the next stroke",
+          log_has("\t0,0,600,240,120,0,160\n") && log_count("area") == 2);
+    osk_paper_scale(&o, 9);             /* counts from the next session */
+    write_letter(220);
+    run(&o, 50);
+    CHECK("scale: a new scale: the session keeps its units", !log_has("device:9.0000"));
+    osk_finish(&o);
+
+    /* a strike on the bare paper in px: still the last word */
+    fresh("ok", fake);
+    osk_paper_scale(&o, 4.4749);
+    focus(IM_P_NORMAL, 0, "see you at", true);
+    osk_paper_open(&o, now_ms());
+    pen(strike, 3);
+    run(&o, 150);
+    CHECK_STR("scale: strike, empty paper: the last word deleted", app, "see you ");
+    osk_finish(&o);
+
+    /* the recognizer went away: begun again with its units and area */
+    conf("handwriting_pause = 1000\n");
+    fresh("idle", fake);
+    setenv("FAKE_IDLE", "0.2", 1);
+    osk_paper_scale(&o, 4.4749);
+    focus(IM_P_NORMAL, 0, "", true);
+    osk_paper_open(&o, now_ms());
+    write_letter(100);
+    run(&o, 500);
+    write_letter(160);
+    run(&o, 1200);
+    CHECK("scale: begun again: the units and the area again",
+          log_count("begin") == 2 && log_count("area") == 2 && !log_has("\tem\t"));
+    CHECK_STR("scale: ... the reading has all the ink", pre, "w2");
+    conf("handwriting_pause = 200\n");
+    osk_finish(&o);
+
+    /* no scale: em, as before, and the area in em */
+    fresh("ok", fake);
+    focus(IM_P_NORMAL, 0, "", true);
+    osk_paper_open(&o, now_ms());
+    run(&o, 1);
+    CHECK("no scale: em and the area in em", log_has("\t-\tnormal\tem\t") && log_has("\t0,0,8.88889,3.33333,1.66667,0,2.22222\n"));
+    osk_finish(&o);
+
+    /* a recognizer without BASE: bad-area, and the paper goes on without an area */
+    setenv("FAKE_AREA_ERROR", "bad-area", 1);
+    fresh("ok", fake);
+    osk_paper_scale(&o, 4.4749);
+    focus(IM_P_NORMAL, 0, "", true);
+    osk_paper_open(&o, now_ms());
+    write_letter(100);
+    run(&o, PAUSE + 100);
+    CHECK_STR("bad-area: read all the same", pre, "w1");
+    CHECK_INT("bad-area: not asked again for each stroke", log_count("area"), 1);
+    unsetenv("FAKE_AREA_ERROR");
+    osk_finish(&o);
+}
+
 static void test_private(void)
 {
     static const struct { uint32_t purpose, hints; const char *name; } priv[] = {
@@ -787,6 +878,7 @@ int main(int argc, char **argv)
     test_controls();
     test_gestures();
     test_spacing();
+    test_units();
     test_private();
     unlink(logpath);
     return T_DONE();

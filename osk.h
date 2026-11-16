@@ -38,6 +38,9 @@ enum osk_view { OSK_VIEW_KEYS, OSK_VIEW_PAPER, OSK_VIEW_PAPER_KEYS, OSK_VIEW_HID
 #define OSK_NOTE_MS 2600          /* the note after a removal */
 #define OSK_REPEAT_DELAY_MS 500   /* a held Backspace repeats ... */
 #define OSK_REPEAT_MS 80          /* ... this often */
+#ifndef OSK_ROTATION_FILE
+#define OSK_ROTATION_FILE "/run/glassine-rotation"  /* glassine-rotd: the screen's turn */
+#endif
 #define OSK_PEN_NEAR_MS 150       /* the pen came near: where it is (over the keys or not) by then */
 #define OSK_SYNC_MS 30            /* after a late report: the empty commit asking for a fresh one */
 #define OSK_PICK_WAIT_MS 300      /* a pick over a selection: its second step waits this long */
@@ -118,6 +121,9 @@ struct osk {
     char sid[16];
     unsigned long nsession;
     int64_t t0;                 /* the time origin of the session's points */
+    double per_mm;              /* the paper's px per mm (osk_paper_scale; 0: not known, em) */
+    double session_per_mm;      /* ... as the session was begun with */
+    int area_w, area_h;         /* the paper's size the session's area was sent for */
     char want_read[16];         /* the newest read ("": none waiting) */
     bool need_read;             /* a read is owed (the recognizer was away) */
     bool read_fresh;            /* the readings are for the ink as it is */
@@ -181,6 +187,9 @@ bool osk_show_pen(struct osk *o, int64_t now);
  * when a field can take it, the ink goes; no view change is asked for */
 void osk_paper_end(struct osk *o, int64_t now);
 void osk_paper_size(struct osk *o, int w, int h);
+/* the screen's scale: surface px per mm (0: not known). The recognizer then compares the
+ * ink's size in millimetres; a new value counts from the next session. */
+void osk_paper_scale(struct osk *o, double per_mm);
 /* the pen on the paper (surface px; pressure 0..1, -1 unknown; t ms of the event) */
 void osk_pen_down(struct osk *o, double x, double y, double pressure, uint32_t t, int64_t now);
 void osk_pen_motion(struct osk *o, double x, double y, double pressure, uint32_t t);
