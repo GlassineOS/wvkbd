@@ -99,6 +99,23 @@ double paper_em(const struct paper *p)
     return p->h > 0 ? p->h * 0.3 : 1;
 }
 
+double paper_unit(const struct paper *p, double per_mm)
+{
+    return per_mm > 0 ? 1 : paper_em(p);
+}
+
+double paper_line(const struct paper *p)
+{
+    return p->h > 0 ? p->h * 0.5 : 1;
+}
+
+void paper_area_text(const struct paper *p, double per_mm, int rot, char *out, size_t n)
+{
+    double u = paper_unit(p, per_mm);
+    snprintf(out, n, "0,0,%.6g,%.6g,%.6g,%d,%.6g", p->w / u, p->h / u, paper_line(p) / u, rot,
+             paper_guide_y(p) / u);
+}
+
 int paper_chip_order(int n, int slot)
 {
     /* slots left to right: alternative 1, the best, alternative 2 */
@@ -153,9 +170,10 @@ int paper_hit(const struct paper *p, int x, int y, struct paper_item *out)
     return -1;
 }
 
-char *paper_points_text(const struct paper *p, const struct paper_stroke *s, bool pressure, size_t *len)
+char *paper_points_text(const struct paper *p, const struct paper_stroke *s, bool pressure, double per_mm,
+                        size_t *len)
 {
-    double em = paper_em(p);
+    double em = paper_unit(p, per_mm);
     size_t cap = (size_t)s->n * 40 + 16, k = 0;
     char *b = malloc(cap);
     if (!b) return NULL;
